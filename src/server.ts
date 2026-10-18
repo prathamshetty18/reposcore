@@ -13,7 +13,7 @@ import { fileURLToPath } from "url";
 import fs from "fs";
 import { z } from "zod";
 
-import { Scorecard } from "./schema.js";
+import { Scorecard, CriterionId } from "./schema.js";
 
 if (typeof process.loadEnvFile === "function") {
   try {
@@ -101,6 +101,17 @@ function resolveRepoUrl(): string | null {
 
 const REPO_URL = resolveRepoUrl(); // null if not determinable
 
+// ---- Client IP resolution (trust proxy / X-Forwarded-For) ---
+export function getClientIp(req: Request): string {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (forwarded) {
+    const headerStr = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+    const client = headerStr.split(",")[0].trim();
+    if (client) return client;
+  }
+  return req.ip || req.socket.remoteAddress || "unknown";
+}
+
 // ---- Rate limiting (in-memory, injectable) ------------------
 export type RateLimitOptions = {
   windowMs: number;   // window size in ms
@@ -109,7 +120,12 @@ export type RateLimitOptions = {
 
 type RateLimitEntry = { count: number; resetAt: number };
 
-function makeRateLimiter(opts: RateLimitOptions) {
+export type RateLimiter = {
+  checkAndConsume: (ip: string) => { allowed: boolean; retryAfterSec?: number; message?: string };
+  reset: () => void;
+};
+
+export function makeRateLimiter(opts: RateLimitOptions): RateLimiter {
   const store = new Map<string, RateLimitEntry>();
   const MAX_ENTRIES = 10_000;
 
@@ -131,29 +147,84 @@ function makeRateLimiter(opts: RateLimitOptions) {
   }, Math.min(opts.windowMs, 60_000));
   if (cleanupTimer.unref) cleanupTimer.unref();
 
-  return function rateLimitMiddleware(req: Request, res: Response, next: NextFunction): void {
-    const ip = req.ip ?? "unknown";
-    const now = Date.now();
-    const entry = store.get(ip);
+  return {
+    checkAndConsume(ip: string) {
+      const now = Date.now();
+      const entry = store.get(ip);
 
-    if (!entry || entry.resetAt <= now) {
-      store.set(ip, { count: 1, resetAt: now + opts.windowMs });
-      next();
-      return;
-    }
+      if (!entry || entry.resetAt <= now) {
+        store.set(ip, { count: 1, resetAt: now + opts.windowMs });
+        return { allowed: true };
+      }
 
-    if (entry.count < opts.maxRequests) {
-      entry.count++;
-      next();
-      return;
-    }
+      if (entry.count < opts.maxRequests) {
+        entry.count++;
+        return { allowed: true };
+      }
 
-    // Rate limited
-    const retryAfterSec = Math.ceil((entry.resetAt - now) / 1000);
-    res.setHeader("Retry-After", String(retryAfterSec));
-    res.status(429).json({ error: `Too many requests. Please wait ${retryAfterSec} second(s) before retrying.` });
+      const retryAfterSec = Math.ceil((entry.resetAt - now) / 1000);
+      return {
+        allowed: false,
+        retryAfterSec,
+        message: "Too many requests. Please try again later.",
+      };
+    },
+    reset() {
+      store.clear();
+    },
   };
 }
+
+// ---- Whole Report Cache -------------------------------------
+export interface CacheEntry {
+  scorecard: import("./schema.js").Scorecard;
+  expiresAt: number;
+  hasAIFailure: boolean;
+  commitSha?: string | null;
+}
+
+export class ReportCache {
+  private store = new Map<string, CacheEntry>();
+
+  buildKey(url: string, customRules?: CustomRule[]): string {
+    const normUrl = url.toLowerCase().trim().replace(/\/+$/, "");
+    const rulesKey = customRules && customRules.length > 0 ? `#${JSON.stringify(customRules)}` : "";
+    return `${normUrl}${rulesKey}`;
+  }
+
+  get(key: string): import("./schema.js").Scorecard | null {
+    const entry = this.store.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+      this.store.delete(key);
+      return null;
+    }
+    return entry.scorecard;
+  }
+
+  set(
+    key: string,
+    scorecard: import("./schema.js").Scorecard,
+    hasAIFailure: boolean,
+    commitSha?: string | null
+  ): void {
+    // Cache for 90 seconds (1.5 min) on AI failure so transient errors don't stick; 1 hour on success
+    const ttlMs = hasAIFailure ? 90_000 : 3_600_000;
+    this.store.set(key, {
+      scorecard,
+      expiresAt: Date.now() + ttlMs,
+      hasAIFailure,
+      commitSha,
+    });
+  }
+
+  clear(): void {
+    this.store.clear();
+  }
+}
+
+// Global default report cache
+const defaultReportCache = new ReportCache();
 
 // ---- URL validation -----------------------------------------
 // GitHub URL: https only, github.com host, /owner/repo path,
@@ -204,14 +275,12 @@ function validateGithubUrl(raw: string): { ok: true; normalised: string } | { ok
 // ---- Request body schema ------------------------------------
 const JudgeBodySchema = z.object({
   url: z.string(),
-  mode: z.enum(["rules", "rules+ai", "rules+gemma"]),
+  mode: z.enum(["rules", "rules+ai", "rules+gemma"]).optional(),
   apiKey: z.string().optional(),
   customRules: z.array(CustomRuleSchema).optional(),
 }).strict(); // reject unknown keys
 
 // ---- Error mapping from upstream errors ---------------------
-// Person 1's errors may carry { status, publicMessage } — inspect if present.
-// Otherwise map to a safe generic 500.
 type UpstreamError = Error & { status?: number; publicMessage?: string };
 
 function mapUpstreamError(err: unknown): { statusCode: number; message: string } {
@@ -221,8 +290,10 @@ function mapUpstreamError(err: unknown): { statusCode: number; message: string }
   if (err && typeof err === "object") {
     const e = err as UpstreamError;
     if (typeof e.status === "number" && typeof e.publicMessage === "string") {
-      // Upstream provided a safe public message — use it
       return { statusCode: e.status, message: e.publicMessage };
+    }
+    if (e.status === 404 || e.status === 403) {
+      return { statusCode: 404, message: "Repository not found or private." };
     }
   }
   // Generic safe fallback — never expose internal message, stack, or secrets
@@ -261,6 +332,7 @@ export type CreateAppOptions = {
   rateLimit?: RateLimitOptions;
   /** Overall timeout for the judge pipeline in ms (default: JUDGE_TIMEOUT_MS env or 120000) */
   timeoutMs?: number;
+  reportCache?: ReportCache;
 };
 
 export function createApp(options: CreateAppOptions = {}): express.Express {
@@ -271,18 +343,19 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     (process.env["JUDGE_TIMEOUT_MS"] ? Number(process.env["JUDGE_TIMEOUT_MS"]) : 120_000);
 
   const rateLimitOpts: RateLimitOptions = options.rateLimit ?? {
-    windowMs: 60_000,
-    maxRequests: 10,
+    windowMs: 3_600_000,
+    maxRequests: Number(process.env["RATE_LIMIT_MAX"] ?? 10),
   };
   const rateLimiter = makeRateLimiter(rateLimitOpts);
+  const reportCache = options.reportCache ?? new ReportCache();
 
   const app = express();
 
   // Disable x-powered-by
   app.disable("x-powered-by");
 
-  // Note: "trust proxy" would need configuration when behind a reverse proxy.
-  // Currently disabled — req.ip reflects the direct connection.
+  // Trust proxy for reverse proxy deployments (respects X-Forwarded-For)
+  app.set("trust proxy", true);
 
   // Security headers on every response
   app.use((_req: Request, res: Response, next: NextFunction) => {
@@ -341,7 +414,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   });
 
   // ---- POST /api/judge ----------------------------------------
-  app.post("/api/judge", rateLimiter, async (req: Request, res: Response) => {
+  app.post("/api/judge", async (req: Request, res: Response) => {
     // 1. Parse and validate request body
     const bodyResult = JudgeBodySchema.safeParse(req.body);
     if (!bodyResult.success) {
@@ -352,7 +425,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       return;
     }
 
-    const { url: rawUrl, mode, apiKey, customRules } = bodyResult.data;
+    const { url: rawUrl, mode: requestedMode, apiKey, customRules } = bodyResult.data;
 
     // 2. Validate GitHub URL
     const urlResult = validateGithubUrl(rawUrl);
@@ -362,7 +435,33 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     }
     const url = urlResult.normalised;
 
-    // 3. Run pipeline with timeout
+    // 3. Cache lookup BEFORE rate limit consumption (cache hits must not count toward rate limit)
+    const cacheKey = reportCache.buildKey(url, customRules);
+    const cachedScorecard = reportCache.get(cacheKey);
+    if (cachedScorecard) {
+      res.setHeader("X-RepoJudge-Cache", "HIT");
+      res.setHeader("X-RepoJudge-Data-Source", USING_STUBS ? "stub" : "live");
+      res.json(cachedScorecard);
+      return;
+    }
+
+    // 4. Rate limit check (only on cache miss)
+    const clientIp = getClientIp(req);
+    const rateCheck = rateLimiter.checkAndConsume(clientIp);
+    if (!rateCheck.allowed) {
+      if (rateCheck.retryAfterSec) {
+        res.setHeader("Retry-After", String(rateCheck.retryAfterSec));
+      }
+      res.status(429).json({ error: rateCheck.message });
+      return;
+    }
+
+    // 5. Determine effective mode: auto-select "rules+ai" if AI is configured or user key provided, else "rules"
+    const userApiKey = apiKey || (req.headers["x-api-key"] as string | undefined);
+    const hasAI = isAIConfigured(process.env) || Boolean(userApiKey);
+    const effectiveMode = requestedMode ?? (hasAI ? "rules+ai" : "rules");
+
+    // 6. Run pipeline with timeout
     let timeoutId: NodeJS.Timeout | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => reject(new Error("TIMEOUT")), timeoutMs);
@@ -370,14 +469,13 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     });
 
     try {
-      const userApiKey = apiKey || (req.headers["x-api-key"] as string | undefined);
       const scorecard = await Promise.race([
-        runPipeline(deps, url, mode, userApiKey, customRules),
+        runPipeline(deps, url, effectiveMode, userApiKey, customRules),
         timeoutPromise,
       ]);
       if (timeoutId) clearTimeout(timeoutId);
 
-      // 4. Validate output with Scorecard schema
+      // 7. Validate output with Scorecard schema
       const parseResult = Scorecard.safeParse(scorecard);
       if (!parseResult.success) {
         console.error("[repojudge] Internal result validation failed (schema mismatch)");
@@ -385,13 +483,16 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         return;
       }
 
-      // 5. Set data-source header
-      if (USING_STUBS) {
-        res.setHeader("X-RepoJudge-Data-Source", "stub");
-      } else {
-        res.setHeader("X-RepoJudge-Data-Source", "live");
-      }
+      // 8. Store in cache (90s TTL if AI failed, 1 hour if clean)
+      const hasAIFailure = Boolean(
+        scorecard.aiFailed ||
+        (effectiveMode === "rules+ai" && scorecard.unscored?.length === 6)
+      );
+      reportCache.set(cacheKey, parseResult.data, hasAIFailure, parseResult.data.repo);
 
+      // 9. Set headers and respond
+      res.setHeader("X-RepoJudge-Cache", "MISS");
+      res.setHeader("X-RepoJudge-Data-Source", USING_STUBS ? "stub" : "live");
       res.json(parseResult.data);
     } catch (err: unknown) {
       if (timeoutId) clearTimeout(timeoutId);
@@ -467,19 +568,20 @@ async function runPipeline(
   const allCustomRules = Array.from(ruleMap.values());
   const customRuleResults = runCustomRules(snap, allCustomRules);
 
+  const aiConfigured = isAIConfigured(process.env) || Boolean(userApiKey);
+
   if (mode === "rules+gemma") {
-    // Call judge exactly once with snap (for backwards compatibility with existing mock signatures)
-    const result = await Promise.resolve(deps.judge(snap));
-    const servedBy =
-      result.modelInfo?.servedBy ||
-      process.env["GEMMA_SERVED_BY"]?.trim() ||
-      "Gemini API (hosting endpoint)";
-    const modelName =
-      result.modelInfo?.name ||
-      process.env["GEMMA_MODEL"] ||
-      "unknown";
-    return Promise.resolve(
-      deps.mergeScorecard(
+    try {
+      const result = await Promise.resolve(deps.judge(snap));
+      const servedBy =
+        result.modelInfo?.servedBy ||
+        process.env["GEMMA_SERVED_BY"]?.trim() ||
+        "Gemini API (hosting endpoint)";
+      const modelName =
+        result.modelInfo?.name ||
+        process.env["GEMMA_MODEL"] ||
+        "unknown";
+      const sc = deps.mergeScorecard(
         snap,
         rules,
         result.verdicts,
@@ -488,23 +590,40 @@ async function runPipeline(
         servedBy,
         modelName,
         customRuleResults
-      )
-    );
+      );
+      sc.aiAvailable = true;
+      sc.aiFailed = result.unscored.length === 6 && result.verdicts.length === 0;
+      return sc;
+    } catch (err) {
+      console.warn("[repojudge] Gemma judge failed, returning rule results:", err instanceof Error ? err.name : err);
+      const sc = deps.mergeScorecard(
+        snap,
+        rules,
+        [],
+        mode,
+        CriterionId.options,
+        null,
+        null,
+        customRuleResults
+      );
+      sc.aiAvailable = true;
+      sc.aiFailed = true;
+      return sc;
+    }
   }
 
   if (mode === "rules+ai") {
-    // Call judge with rules and userApiKey
-    const result = await Promise.resolve(deps.judge(snap, { rules, userApiKey }));
-    const servedBy =
-      result.modelInfo?.servedBy ||
-      process.env["AI_PROVIDER"]?.toUpperCase() ||
-      "AI";
-    const modelName =
-      result.modelInfo?.name ||
-      process.env["AI_MODEL"] ||
-      "unknown";
-    return Promise.resolve(
-      deps.mergeScorecard(
+    try {
+      const result = await Promise.resolve(deps.judge(snap, { rules, userApiKey }));
+      const servedBy =
+        result.modelInfo?.servedBy ||
+        process.env["AI_PROVIDER"]?.toUpperCase() ||
+        "AI";
+      const modelName =
+        result.modelInfo?.name ||
+        process.env["AI_MODEL"] ||
+        "unknown";
+      const sc = deps.mergeScorecard(
         snap,
         rules,
         result.verdicts,
@@ -513,15 +632,35 @@ async function runPipeline(
         servedBy,
         modelName,
         customRuleResults
-      )
-    );
+      );
+      sc.aiAvailable = true;
+      sc.aiFailed = result.unscored.length === 6 && result.verdicts.length === 0;
+      return sc;
+    } catch (err) {
+      console.warn("[repojudge] AI judge failed, returning rule results with unscored AI criteria:", err instanceof Error ? err.name : err);
+      const sc = deps.mergeScorecard(
+        snap,
+        rules,
+        [],
+        mode,
+        CriterionId.options,
+        null,
+        null,
+        customRuleResults
+      );
+      sc.aiAvailable = aiConfigured;
+      sc.aiFailed = true;
+      return sc;
+    }
   }
 
   // In rules mode: never call judge
-  if (customRuleResults.length === 0) {
-    return Promise.resolve(deps.mergeScorecard(snap, rules, [], "rules"));
-  }
-  return Promise.resolve(deps.mergeScorecard(snap, rules, [], "rules", [], null, null, customRuleResults));
+  const sc = customRuleResults.length === 0
+    ? deps.mergeScorecard(snap, rules, [], "rules")
+    : deps.mergeScorecard(snap, rules, [], "rules", [], null, null, customRuleResults);
+  sc.aiAvailable = aiConfigured;
+  sc.aiFailed = false;
+  return sc;
 }
 
 // ============================================================

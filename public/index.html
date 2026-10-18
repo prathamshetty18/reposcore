@@ -47,14 +47,13 @@
           <nav class="nav__links" aria-label="Page sections">
             <a href="#how-it-works" class="nav__link">Pipeline</a>
             <a href="#methodology"  class="nav__link">Methodology</a>
-            <a href="#modes"        class="nav__link">Modes</a>
           </nav>
 
           <span class="nav__spacer" aria-hidden="true"></span>
 
-          <!-- Current mode badge (updated by JS) -->
-          <div id="nav-mode-badge" class="nav__mode-badge is-rules" aria-live="polite" aria-atomic="true">
-            <span id="nav-mode-text">Rules Only</span>
+          <!-- Current mode badge (hidden in single-input flow) -->
+          <div id="nav-mode-badge" class="nav__mode-badge is-rules" aria-live="polite" aria-atomic="true" style="display:none">
+            <span id="nav-mode-text">Rules</span>
           </div>
 
           <!-- GitHub link (populated by JS from /api/config) -->
@@ -88,7 +87,6 @@
         <div id="mobile-panel" class="nav__mobile-panel" role="menu">
           <a href="#how-it-works" class="nav__mobile-link" role="menuitem">Pipeline</a>
           <a href="#methodology"  class="nav__mobile-link" role="menuitem">Methodology</a>
-          <a href="#modes"        class="nav__mobile-link" role="menuitem">Modes</a>
           <a id="mobile-github-link"
              href="https://github.com/prathamshetty18/reposcore"
              target="_blank"
@@ -174,67 +172,7 @@
               <p class="input-feedback" id="url-feedback" role="status" aria-live="polite"></p>
             </div>
 
-            <!-- Mode selector -->
-            <div class="mode-selector" id="modes">
-              <span class="mode-selector__label" id="mode-group-label">EVALUATION PIPELINE MODE</span>
-              <div class="mode-selector__group"
-                   role="radiogroup"
-                   aria-labelledby="mode-group-label">
 
-                <!-- Rules Only -->
-                <input type="radio"
-                       class="mode-option__input"
-                       name="mode"
-                       id="mode-rules"
-                       value="rules"
-                       checked
-                       aria-describedby="mode-rules-desc" />
-                <label class="mode-option" for="mode-rules">
-                  <span class="mode-option__title">
-                    <span class="mode-dot" style="color:var(--c-cyan-500)"></span>
-                    RULES ONLY
-                  </span>
-                  <span class="mode-option__desc" id="mode-rules-desc">
-                    Pure deterministic static checks. Verifiable, reproducible, sub-second runtime. Zero AI calls.
-                  </span>
-                </label>
-
-                <!-- Rules + AI (Groq) -->
-                <input type="radio"
-                       class="mode-option__input"
-                       name="mode"
-                       id="mode-ai"
-                       value="rules+ai"
-                       aria-describedby="mode-ai-desc" />
-                <label class="mode-option" for="mode-ai">
-                  <span class="mode-option__title">
-                    <span class="mode-dot" style="color:var(--c-violet-400)"></span>
-                    RULES + AI (GROQ)
-                  </span>
-                  <span class="mode-option__desc" id="mode-ai-desc">
-                    Deterministic checks plus Groq AI advisory scoring. AI verdicts do not override rules.
-                  </span>
-                </label>
-              </div>
-
-              <!-- AI config message and custom key field -->
-              <div class="ai-config-section" style="margin-top:0.75rem;">
-                <div id="ai-disabled-msg" style="display:none; color:var(--c-amber-400); font-size:0.8rem; margin-bottom:0.4rem;" role="status">
-                  AI mode is disabled because no API key or provider is configured on the server. Provide an API key below to enable Rules + AI.
-                </div>
-                <div class="user-key-field">
-                  <label for="user-api-key" style="display:block; font-size:0.75rem; color:var(--c-text-tertiary); margin-bottom:0.25rem;">
-                    AI API Key (optional):
-                  </label>
-                  <input type="password"
-                         id="user-api-key"
-                         class="input-text"
-                         style="font-size:0.8rem; padding:0.4rem 0.6rem; width:100%; max-width:320px;"
-                         placeholder="Enter Groq / OpenRouter API key"
-                         autocomplete="off" />
-                </div>
-              </div>
-            </div>
 
             <!-- Custom Rules Panel -->
             <div class="custom-rules-panel" id="custom-rules-panel">
@@ -342,7 +280,7 @@
                    stroke-linejoin="round" aria-hidden="true" focusable="false">
                 <polygon points="5 3 19 12 5 21 5 3"></polygon>
               </svg>
-              RUN REPOSITORY AUDIT
+              ANALYZE REPOSITORY
             </button>
 
             <!-- Sample links -->

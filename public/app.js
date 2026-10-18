@@ -81,6 +81,7 @@ export const CLIENT_TIMEOUT_MS = 120_000;
 
 let _state = "idle";
 let _currentMode = "rules";
+let _serverAIAvailable = false;
 
 export function getState() { return _state; }
 
@@ -741,45 +742,34 @@ export function renderResults(scorecard, dataSource) {
   const totalBlock = qs("#results-total-block");
   if (totalBlock) {
     totalBlock.textContent = "";
-    if (mode === "rules") {
-      const totalWrap = h("div", { class: "results-total" });
-      const lbl = h("span", { class: "results-total__label" });
-      lbl.textContent = "Built-in Total";
-      const val = h("span", { class: "results-total__value" });
-      if (typeof total === "number" && isFinite(total)) {
-        val.textContent = `${total} / 30`;
-      } else {
-        val.textContent = "—";
-      }
-      totalWrap.appendChild(lbl);
-      totalWrap.appendChild(val);
-      totalBlock.appendChild(totalWrap);
-    } else if (total !== null && typeof total === "number" && isFinite(total)) {
-      const totalWrap = h("div", { class: "results-total" });
-      const lbl = h("span", { class: "results-total__label" });
-      lbl.textContent = "Built-in Total";
-      const val = h("span", { class: "results-total__value" });
-      val.textContent = `${total} / 30`;
-      totalWrap.appendChild(lbl);
-      totalWrap.appendChild(val);
-      totalBlock.appendChild(totalWrap);
-    } else {
-      const unavailWrap = h("div", { class: "results-total" });
-      const icon = makeWarnIcon();
-      const msg = h("div");
-      const msgLine = h("p", { class: "results-total--unavailable text-sm" });
-      msgLine.textContent =
-        "Total unavailable: one or more criteria were not scored.";
-      msg.appendChild(msgLine);
-      if (unscored && unscored.length > 0) {
-        const unscoredList = h("p", { class: "text-xs text-tertiary mt-4" });
-        unscoredList.textContent = `Not scored: ${unscored.join(", ")}`;
-        msg.appendChild(unscoredList);
-      }
-      unavailWrap.appendChild(icon);
-      unavailWrap.appendChild(msg);
-      totalBlock.appendChild(unavailWrap);
+
+    // Show AI fallback note if AI review failed or was unavailable
+    const isAiFailedOrUnavailable =
+      scorecard.aiFailed === true ||
+      scorecard.aiAvailable === false ||
+      (mode !== "rules" && (verdicts ?? []).length === 0 && (unscored ?? []).length === 6);
+
+    if (isAiFailedOrUnavailable) {
+      const noteWrap = h("div", {
+        class: "ai-fallback-note",
+        style: "display:flex;align-items:center;gap:0.5rem;padding:0.6rem 0.85rem;background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.25);border-radius:6px;color:var(--c-amber-400);font-size:0.85rem;margin-bottom:1rem;",
+      });
+      noteWrap.appendChild(makeWarnIcon());
+      const noteText = h("span");
+      noteText.textContent = "AI review unavailable, showing rule results only.";
+      noteWrap.appendChild(noteText);
+      totalBlock.appendChild(noteWrap);
     }
+
+    const totalWrap = h("div", { class: "results-total" });
+    const lbl = h("span", { class: "results-total__label" });
+    lbl.textContent = "Built-in Total";
+    const val = h("span", { class: "results-total__value" });
+    const builtInScore = scorecard.rulesTotal ?? (typeof total === "number" ? total : 0);
+    val.textContent = `${builtInScore} / 30`;
+    totalWrap.appendChild(lbl);
+    totalWrap.appendChild(val);
+    totalBlock.appendChild(totalWrap);
   }
 
   // Summary bar
@@ -895,11 +885,8 @@ export function renderResults(scorecard, dataSource) {
 // § API
 // ============================================================
 
-export async function fetchJudge(url, mode, signal, apiKey, customRules) {
-  const payload = { url, mode };
-  if (apiKey && apiKey.trim().length > 0) {
-    payload.apiKey = apiKey.trim();
-  }
+export async function fetchJudge(url, signal, customRules) {
+  const payload = { url };
   if (customRules && Array.isArray(customRules) && customRules.length > 0) {
     payload.customRules = customRules;
   }
@@ -1650,10 +1637,6 @@ export function initInputPanel() {
     clearFeedback();
     urlInput.setAttribute("aria-invalid", "false");
 
-    const selectedMode = modeInputs.find((r) => r.checked)?.value ?? "rules";
-    _currentMode = selectedMode;
-    updateNavMode(_currentMode);
-
     if (_currentAbortController) {
       _currentAbortController.abort();
     }
@@ -1663,23 +1646,38 @@ export function initInputPanel() {
     if (analyzeBtn) analyzeBtn.disabled = true;
     setState("loading");
 
+    const loadingTitle = qs("#loading-title");
+    if (loadingTitle) loadingTitle.textContent = "Checking rules…";
+
+    let aiReviewTimer = null;
+    if (_serverAIAvailable) {
+      aiReviewTimer = setTimeout(() => {
+        if (getState() === "loading" && loadingTitle) {
+          loadingTitle.textContent = "Getting AI review…";
+        }
+      }, 750);
+    }
+
     const clientTimeout = setTimeout(() => {
       _currentAbortController?.abort();
     }, CLIENT_TIMEOUT_MS);
 
-    const userApiKey = qs("#user-api-key")?.value?.trim();
-
     try {
-      const customRules = loadCustomRules();
-      const { scorecard, dataSource } = await fetchJudge(rawUrl, selectedMode, signal, userApiKey, customRules);
+      const allCustom = loadCustomRules();
+      const customRules = allCustom && allCustom.length > 0 ? allCustom : undefined;
+      const { scorecard, dataSource } = await fetchJudge(rawUrl, signal, customRules);
       clearTimeout(clientTimeout);
+      if (aiReviewTimer) clearTimeout(aiReviewTimer);
 
+      _currentMode = scorecard.mode ?? "rules";
+      updateNavMode(_currentMode);
       _lastScorecard = scorecard;
       setState("success");
       renderResults(scorecard, dataSource);
       initCardTilt();
     } catch (err) {
       clearTimeout(clientTimeout);
+      if (aiReviewTimer) clearTimeout(aiReviewTimer);
 
       if (err.name === "AbortError") {
         showError("Request was cancelled or timed out. Please retry.");
@@ -1758,6 +1756,7 @@ export function updateNavMode(mode) {
 
 export function initModeSelector() {
   const modeInputs = qsa("input[name='mode']");
+  if (modeInputs.length === 0) return;
   const gemmaStep  = qs("#loading-gemma-step");
 
   for (const radio of modeInputs) {
@@ -1867,6 +1866,7 @@ export async function fetchConfig() {
 
 export async function applyConfig() {
   const config = await fetchConfig();
+  _serverAIAvailable = Boolean(config.aiAvailable);
   const repoUrl = config.repoUrl;
 
   const links = [
@@ -1888,36 +1888,6 @@ export async function applyConfig() {
       const label = link.getAttribute("aria-label") ?? "";
       link.setAttribute("aria-label", label.replace("Open", "GitHub repository (link pending) —"));
     }
-  }
-
-  // Handle AI availability
-  const aiRadio = qs("#mode-ai") || qs("#mode-gemma");
-  const aiDisabledMsg = qs("#ai-disabled-msg");
-  const userApiKeyInput = qs("#user-api-key");
-
-  function refreshAIAvailability() {
-    const hasCustomKey = Boolean(userApiKeyInput && userApiKeyInput.value.trim().length > 0);
-    const isAvailable = config.aiAvailable || hasCustomKey;
-
-    if (aiRadio) {
-      if (!isAvailable) {
-        aiRadio.disabled = true;
-        if (aiRadio.checked) {
-          const rulesRadio = qs("#mode-rules");
-          if (rulesRadio) rulesRadio.checked = true;
-        }
-        if (aiDisabledMsg) aiDisabledMsg.style.display = "";
-      } else {
-        aiRadio.disabled = false;
-        if (aiDisabledMsg) aiDisabledMsg.style.display = "none";
-      }
-    }
-  }
-
-  refreshAIAvailability();
-
-  if (userApiKeyInput) {
-    userApiKeyInput.addEventListener("input", refreshAIAvailability);
   }
 }
 

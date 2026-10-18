@@ -38,13 +38,13 @@ export function mergeScorecard(
   const generatedAt = new Date().toISOString();
   const rScores = rulesScore(rules);
 
-  if (mode === "rules") {
-    let sum = 0;
-    for (const criterion of ALL_CRITERIA) {
-      sum += rScores[criterion] ?? 0;
-    }
-    const total = Math.round(sum * 10) / 10;
+  let rSum = 0;
+  for (const criterion of ALL_CRITERIA) {
+    rSum += rScores[criterion] ?? 0;
+  }
+  const rulesTotal = Math.round(rSum * 10) / 10;
 
+  if (mode === "rules") {
     const scorecard: Scorecard = {
       repo,
       mode: "rules",
@@ -52,7 +52,8 @@ export function mergeScorecard(
       customRules: customRules ?? [],
       verdicts: [],
       unscored: [],
-      total,
+      total: rulesTotal,
+      rulesTotal,
       model: null,
       generatedAt,
     };
@@ -118,6 +119,7 @@ export function mergeScorecard(
     verdicts,
     unscored: finalUnscored,
     total,
+    rulesTotal,
     model,
     generatedAt,
   };

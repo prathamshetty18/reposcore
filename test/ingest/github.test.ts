@@ -150,7 +150,7 @@ describe("GitHub Ingest Module", () => {
       const mockOctokit = createMockOctokit({ repo: notFoundErr });
 
       await expect(buildSnapshot("https://github.com/owner/repo", { octokit: mockOctokit }))
-        .rejects.toThrow("Repository was not found or is private.");
+        .rejects.toThrow("Repository not found or private.");
     });
 
     it("handles 429 rate limit with reset time in message", async () => {

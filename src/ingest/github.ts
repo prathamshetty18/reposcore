@@ -77,7 +77,7 @@ function handleOctokitError(err: unknown, token?: string): never {
     status === 404 ||
     (status === 403 && message.toLowerCase().includes("not found"))
   ) {
-    throw new IngestError("Repository was not found or is private.", 404);
+    throw new IngestError("Repository not found or private.", 404);
   }
 
   const headers = (err as { response?: { headers?: Record<string, string> } })
@@ -98,6 +98,14 @@ function handleOctokitError(err: unknown, token?: string): never {
       `GitHub API rate limit exceeded. Resets at ${resetTime}.`,
       429
     );
+  }
+
+  if (
+    status === 404 ||
+    status === 403 ||
+    message.toLowerCase().includes("not found")
+  ) {
+    throw new IngestError("Repository not found or private.", 404);
   }
 
   if (
@@ -144,6 +152,10 @@ export async function buildSnapshot(
     repoData = repoRes.data as typeof repoData;
   } catch (err) {
     handleOctokitError(err, token);
+  }
+
+  if (repoData.private) {
+    throw new IngestError("Repository not found or private.", 404);
   }
 
   const isPublic = !repoData.private;

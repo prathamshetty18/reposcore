@@ -65,6 +65,9 @@ export const Scorecard = z.object({
   verdicts: z.array(AIVerdict),
   unscored: z.array(CriterionId),
   total: z.number().nullable(),
+  rulesTotal: z.number().optional(),
+  aiAvailable: z.boolean().optional(),
+  aiFailed: z.boolean().optional(),
   model: z.object({
     name: z.string(),
     servedBy: z.string(),

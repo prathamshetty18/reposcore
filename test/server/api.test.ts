@@ -171,18 +171,49 @@ describe("RepoJudge Server API", () => {
       expect(typeof body.error).toBe("string");
     });
 
-    it("returns 400 { error } when required fields are missing", async () => {
+    it("returns 400 { error } when url is missing", async () => {
       const { server, url } = await startTestServer();
       activeServers.push(server);
 
       const res = await fetch(`${url}/api/judge`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: "https://github.com/owner/repo" }), // missing mode
+        body: JSON.stringify({ mode: "rules" }), // missing url
       });
       expect(res.status).toBe(400);
       const body = (await res.json()) as Record<string, unknown>;
       expect(Object.keys(body)).toEqual(["error"]);
+    });
+
+    it("succeeds when mode is omitted (single-input flow auto-detects AI or rules)", async () => {
+      const buildSnapshot = vi.fn().mockResolvedValue(mockSnapshot);
+      const runRules = vi.fn().mockReturnValue(mockRules);
+      const judge = vi.fn().mockResolvedValue({ verdicts: mockVerdicts, unscored: [] });
+      const mergeScorecard = vi.fn().mockReturnValue({
+        repo: "mock-owner/mock-repo",
+        mode: "rules+ai",
+        rules: mockRules,
+        verdicts: mockVerdicts,
+        unscored: [],
+        total: 5,
+        rulesTotal: 5,
+        model: { name: "test-model", servedBy: "test" },
+        generatedAt: "2026-10-17T10:00:00.000Z",
+      });
+
+      const { server, url } = await startTestServer({
+        deps: { buildSnapshot, runRules, judge, mergeScorecard },
+      });
+      activeServers.push(server);
+
+      const res = await fetch(`${url}/api/judge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: "https://github.com/mock-owner/mock-repo" }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.repo).toBe("mock-owner/mock-repo");
     });
 
     it("returns 400 { error } when unknown keys are sent (strict schema)", async () => {
@@ -537,21 +568,25 @@ describe("RepoJudge Server API", () => {
     });
   });
 
-  // ---- Rate Limiting ------------------------------------------
-  describe("POST /api/judge - Rate Limiting", () => {
-    it("returns 429 with Retry-After header and { error } when rate limit is exceeded", async () => {
-      const buildSnapshot = vi.fn().mockResolvedValue(mockSnapshot);
+  // ---- Rate Limiting & Caching -------------------------------
+  describe("POST /api/judge - Rate Limiting & Caching", () => {
+    it("returns 429 with Retry-After header and { error } when rate limit is exceeded on cache misses", async () => {
+      const buildSnapshot = vi.fn().mockImplementation((url: string) => {
+        const parts = url.replace("https://github.com/", "").split("/");
+        return { ...mockSnapshot, owner: parts[0], name: parts[1] };
+      });
       const runRules = vi.fn().mockReturnValue(mockRules);
-      const mergeScorecard = vi.fn().mockReturnValue({
-        repo: "https://github.com/owner/repo",
+      const mergeScorecard = vi.fn().mockImplementation((snap: RepoSnapshot) => ({
+        repo: `${snap.owner}/${snap.name}`,
         mode: "rules",
         rules: mockRules,
         verdicts: [],
         unscored: [],
         total: 6,
+        rulesTotal: 6,
         model: null,
         generatedAt: "2026-10-17T10:00:00.000Z",
-      });
+      }));
 
       // Inject tiny rate limit: 2 requests per window
       const { server, url } = await startTestServer({
@@ -560,33 +595,171 @@ describe("RepoJudge Server API", () => {
       });
       activeServers.push(server);
 
-      // Request 1: ok
+      // Request 1: ok (miss)
       const r1 = await fetch(`${url}/api/judge`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: "https://github.com/owner/repo", mode: "rules" }),
+        body: JSON.stringify({ url: "https://github.com/owner/repo-1" }),
       });
       expect(r1.status).toBe(200);
+      expect(r1.headers.get("x-repojudge-cache")).toBe("MISS");
 
-      // Request 2: ok
+      // Request 2: ok (miss)
       const r2 = await fetch(`${url}/api/judge`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: "https://github.com/owner/repo", mode: "rules" }),
+        body: JSON.stringify({ url: "https://github.com/owner/repo-2" }),
       });
       expect(r2.status).toBe(200);
+      expect(r2.headers.get("x-repojudge-cache")).toBe("MISS");
 
       // Request 3: rate limited
       const r3 = await fetch(`${url}/api/judge`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: "https://github.com/owner/repo", mode: "rules" }),
+        body: JSON.stringify({ url: "https://github.com/owner/repo-3" }),
       });
       expect(r3.status).toBe(429);
       expect(r3.headers.get("retry-after")).toBeTruthy();
 
       const body = (await r3.json()) as { error: string };
       expect(body.error).toContain("Too many requests");
+    });
+
+    it("cache hits do NOT count toward rate limit", async () => {
+      const buildSnapshot = vi.fn().mockResolvedValue(mockSnapshot);
+      const runRules = vi.fn().mockReturnValue(mockRules);
+      const mergeScorecard = vi.fn().mockReturnValue({
+        repo: "mock-owner/mock-repo",
+        mode: "rules",
+        rules: mockRules,
+        verdicts: [],
+        unscored: [],
+        total: 6,
+        rulesTotal: 6,
+        model: null,
+        generatedAt: "2026-10-17T10:00:00.000Z",
+      });
+
+      // Max requests = 1
+      const { server, url } = await startTestServer({
+        deps: { buildSnapshot, runRules, mergeScorecard },
+        rateLimit: { windowMs: 10_000, maxRequests: 1 },
+      });
+      activeServers.push(server);
+
+      // 1. Initial request: MISS (consumes the 1 token)
+      const r1 = await fetch(`${url}/api/judge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: "https://github.com/mock-owner/mock-repo" }),
+      });
+      expect(r1.status).toBe(200);
+      expect(r1.headers.get("x-repojudge-cache")).toBe("MISS");
+
+      // 2. Repeat requests to the same URL are HITs and succeed despite token exhaustion
+      for (let i = 0; i < 3; i++) {
+        const rHit = await fetch(`${url}/api/judge`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: "https://github.com/mock-owner/mock-repo" }),
+        });
+        expect(rHit.status).toBe(200);
+        expect(rHit.headers.get("x-repojudge-cache")).toBe("HIT");
+      }
+
+      // 3. New URL is a MISS and gets rate limited
+      const rNew = await fetch(`${url}/api/judge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: "https://github.com/mock-owner/other-repo" }),
+      });
+      expect(rNew.status).toBe(429);
+    });
+
+    it("respects X-Forwarded-For with trust proxy enabled", async () => {
+      const buildSnapshot = vi.fn().mockImplementation((url: string) => {
+        const parts = url.replace("https://github.com/", "").split("/");
+        return { ...mockSnapshot, owner: parts[0], name: parts[1] };
+      });
+      const runRules = vi.fn().mockReturnValue(mockRules);
+      const mergeScorecard = vi.fn().mockImplementation((snap: RepoSnapshot) => ({
+        repo: `${snap.owner}/${snap.name}`,
+        mode: "rules",
+        rules: mockRules,
+        verdicts: [],
+        unscored: [],
+        total: 6,
+        rulesTotal: 6,
+        model: null,
+        generatedAt: "2026-10-17T10:00:00.000Z",
+      }));
+
+      // Rate limit: 1 request per IP
+      const { server, url } = await startTestServer({
+        deps: { buildSnapshot, runRules, mergeScorecard },
+        rateLimit: { windowMs: 10_000, maxRequests: 1 },
+      });
+      activeServers.push(server);
+
+      // Client A makes request
+      const rA1 = await fetch(`${url}/api/judge`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Forwarded-For": "203.0.113.10",
+        },
+        body: JSON.stringify({ url: "https://github.com/owner/repo-a" }),
+      });
+      expect(rA1.status).toBe(200);
+
+      // Client A makes second request -> rate limited
+      const rA2 = await fetch(`${url}/api/judge`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Forwarded-For": "203.0.113.10",
+        },
+        body: JSON.stringify({ url: "https://github.com/owner/repo-a2" }),
+      });
+      expect(rA2.status).toBe(429);
+
+      // Client B from different IP makes request -> succeeds!
+      const rB1 = await fetch(`${url}/api/judge`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Forwarded-For": "203.0.113.20",
+        },
+        body: JSON.stringify({ url: "https://github.com/owner/repo-b" }),
+      });
+      expect(rB1.status).toBe(200);
+    });
+
+    it("non-blocking AI: returns 200 with rule results and aiFailed: true when judge throws", async () => {
+      const buildSnapshot = vi.fn().mockResolvedValue(mockSnapshot);
+      const runRules = vi.fn().mockReturnValue(mockRules);
+      const judge = vi.fn().mockRejectedValue(new Error("AI Provider Rate Limit (429)"));
+
+      const { server, url } = await startTestServer({
+        deps: { buildSnapshot, runRules, judge },
+      });
+      activeServers.push(server);
+
+      const res = await fetch(`${url}/api/judge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: "https://github.com/mock-owner/mock-repo-ai-fail",
+          mode: "rules+ai",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.rulesTotal).toBeDefined();
+      expect(body.aiFailed).toBe(true);
+      expect(body.unscored.length).toBe(6);
     });
   });
 });
