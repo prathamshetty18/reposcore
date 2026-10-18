@@ -29,8 +29,9 @@ if (typeof process.loadEnvFile === "function") {
 // ============================================================
 import { buildSnapshot, IngestError } from "./ingest/github.js";
 import { runRules }      from "./rules/index.js";
-import { judge }         from "./judge/gemma.js";
+import { judge }         from "./judge/ai.js";
 import { mergeScorecard } from "./merge.js";
+import { isAIConfigured } from "./judge/provider.js";
 // ============================================================
 // USING_STUBS: set to false when real modules are wired above.
 // While true, every /api/judge response carries:
@@ -40,19 +41,30 @@ const USING_STUBS = false;
 // ============================================================
 
 // ---- Types --------------------------------------------------
-import type { RepoSnapshot, RuleCheck, GemmaVerdict } from "./schema.js";
+import type { RepoSnapshot, RuleCheck, AIVerdict } from "./schema.js";
 
 export type Deps = {
   buildSnapshot: (url: string) => Promise<RepoSnapshot>;
   runRules: (snap: RepoSnapshot) => RuleCheck[];
-  judge: (snap: RepoSnapshot) => Promise<{ verdicts: GemmaVerdict[]; unscored: import("./schema.js").CriterionId[] }>;
+  judge: (
+    snap: RepoSnapshot,
+    deps?: {
+      rules?: RuleCheck[];
+      userApiKey?: string;
+    }
+  ) => Promise<{
+    verdicts: AIVerdict[];
+    unscored: import("./schema.js").CriterionId[];
+    modelInfo?: { name: string; servedBy: string };
+  }>;
   mergeScorecard: (
     snap: RepoSnapshot,
     rules: RuleCheck[],
-    verdicts: GemmaVerdict[],
-    mode: "rules" | "rules+gemma",
+    verdicts: AIVerdict[],
+    mode: "rules" | "rules+ai" | "rules+gemma",
     unscored?: import("./schema.js").CriterionId[],
-    servedBy?: string | null
+    servedBy?: string | null,
+    modelName?: string | null
   ) => import("./schema.js").Scorecard;
 };
 
@@ -189,7 +201,8 @@ function validateGithubUrl(raw: string): { ok: true; normalised: string } | { ok
 // ---- Request body schema ------------------------------------
 const JudgeBodySchema = z.object({
   url: z.string(),
-  mode: z.enum(["rules", "rules+gemma"]),
+  mode: z.enum(["rules", "rules+ai", "rules+gemma"]),
+  apiKey: z.string().optional(),
 }).strict(); // reject unknown keys
 
 // ---- Error mapping from upstream errors ---------------------
@@ -302,7 +315,15 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   // ---- GET /api/config ----------------------------------------
   app.get("/api/config", (_req: Request, res: Response) => {
     // repoUrl validated to start with https://github.com/ or null
-    res.json({ repoUrl: REPO_URL });
+    const aiAvailable = isAIConfigured(process.env);
+    const provider = process.env.AI_PROVIDER || (aiAvailable ? "groq" : null);
+    const model = process.env.AI_MODEL || null;
+    res.json({
+      repoUrl: REPO_URL,
+      aiAvailable,
+      provider,
+      model,
+    });
   });
 
   // ---- GET /model-card ----------------------------------------
@@ -327,7 +348,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       return;
     }
 
-    const { url: rawUrl, mode } = bodyResult.data;
+    const { url: rawUrl, mode, apiKey } = bodyResult.data;
 
     // 2. Validate GitHub URL
     const urlResult = validateGithubUrl(rawUrl);
@@ -345,8 +366,9 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     });
 
     try {
+      const userApiKey = apiKey || (req.headers["x-api-key"] as string | undefined);
       const scorecard = await Promise.race([
-        runPipeline(deps, url, mode),
+        runPipeline(deps, url, mode, userApiKey),
         timeoutPromise,
       ]);
       if (timeoutId) clearTimeout(timeoutId);
@@ -402,16 +424,23 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 async function runPipeline(
   deps: Deps,
   url: string,
-  mode: "rules" | "rules+gemma"
+  mode: "rules" | "rules+ai" | "rules+gemma",
+  userApiKey?: string
 ): Promise<import("./schema.js").Scorecard> {
   const snap = await Promise.resolve(deps.buildSnapshot(url));
   const rules = await Promise.resolve(deps.runRules(snap));
 
   if (mode === "rules+gemma") {
-    // Call judge exactly once
+    // Call judge exactly once with snap (for backwards compatibility with existing mock signatures)
     const result = await Promise.resolve(deps.judge(snap));
     const servedBy =
-      process.env["GEMMA_SERVED_BY"]?.trim() || "Gemini API (hosting endpoint)";
+      result.modelInfo?.servedBy ||
+      process.env["GEMMA_SERVED_BY"]?.trim() ||
+      "Gemini API (hosting endpoint)";
+    const modelName =
+      result.modelInfo?.name ||
+      process.env["GEMMA_MODEL"] ||
+      "unknown";
     return Promise.resolve(
       deps.mergeScorecard(
         snap,
@@ -419,13 +448,38 @@ async function runPipeline(
         result.verdicts,
         mode,
         result.unscored,
-        servedBy
+        servedBy,
+        modelName
+      )
+    );
+  }
+
+  if (mode === "rules+ai") {
+    // Call judge with rules and userApiKey
+    const result = await Promise.resolve(deps.judge(snap, { rules, userApiKey }));
+    const servedBy =
+      result.modelInfo?.servedBy ||
+      process.env["AI_PROVIDER"]?.toUpperCase() ||
+      "AI";
+    const modelName =
+      result.modelInfo?.name ||
+      process.env["AI_MODEL"] ||
+      "unknown";
+    return Promise.resolve(
+      deps.mergeScorecard(
+        snap,
+        rules,
+        result.verdicts,
+        mode,
+        result.unscored,
+        servedBy,
+        modelName
       )
     );
   }
 
   // In rules mode: never call judge
-  return Promise.resolve(deps.mergeScorecard(snap, rules, [], mode));
+  return Promise.resolve(deps.mergeScorecard(snap, rules, [], "rules"));
 }
 
 // ============================================================

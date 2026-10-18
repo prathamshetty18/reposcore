@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { judge, type GemmaClient } from "../../src/judge/gemma.js";
+import { judge, type AIClient as GemmaClient } from "../../src/judge/ai.js";
 import { mergeScorecard } from "../../src/merge.js";
 import { runRules } from "../../src/rules/index.js";
 import { Scorecard } from "../../src/schema.js";

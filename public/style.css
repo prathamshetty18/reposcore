@@ -509,7 +509,8 @@ input, select, textarea { font: inherit; }
   transition: color var(--tx-fast), border-color var(--tx-fast);
 }
 .nav__mode-badge.is-rules  { color: var(--c-cyan-500);   border-color: var(--c-border-cyan); }
-.nav__mode-badge.is-gemma  { color: var(--c-violet-400); border-color: var(--c-border-violet); }
+.nav__mode-badge.is-gemma,
+.nav__mode-badge.is-ai     { color: var(--c-violet-400); border-color: var(--c-border-violet); }
 
 /* Nav GitHub link */
 .nav__github {
@@ -1189,7 +1190,8 @@ input, select, textarea { font: inherit; }
 }
 
 .badge--rules  { color: var(--c-cyan-500);   border-color: var(--c-border-cyan);   background: var(--c-cyan-halo); }
-.badge--gemma  { color: var(--c-violet-400); border-color: var(--c-border-violet); background: var(--c-violet-halo); }
+.badge--gemma,
+.badge--ai     { color: var(--c-violet-400); border-color: var(--c-border-violet); background: var(--c-violet-halo); }
 .badge--time   { color: var(--c-text-tertiary); }
 
 /* Total score block */
@@ -1809,7 +1811,8 @@ input, select, textarea { font: inherit; }
 }
 
 .method-card--rules  { border-left: 3px solid var(--c-cyan-500); }
-.method-card--gemma  { border-left: 3px solid var(--c-violet-400); }
+.method-card--gemma,
+.method-card--ai     { border-left: 3px solid var(--c-violet-400); }
 
 .method-card__title {
   display: flex;

@@ -13,8 +13,8 @@ This project follows the [MLH Code of Conduct](https://github.com/MLH/mlh-polici
 ## Getting Started
 
 ```bash
-git clone https://github.com/Dragon-looping/Repo-Judge.git
-cd Repo-Judge
+git clone https://github.com/prathamshetty18/reposcore.git
+cd reposcore
 npm install
 cp .env.example .env   # fill in your tokens
 npm run dev

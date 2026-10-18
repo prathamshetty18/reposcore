@@ -407,10 +407,10 @@ export function buildCriterionCard(criterionId, rules, verdict, mode) {
 
   body.appendChild(rulesSection);
 
-  // Gemma verdict section
+  // AI verdict section
   const gemmaSection = h("div", { class: "criterion-section" });
   const gemmaLabel = h("div", { class: "criterion-section__label" });
-  gemmaLabel.textContent = "Gemma 4 assessment (AI, advisory)";
+  gemmaLabel.textContent = "AI assessment (advisory)";
 
   const dot = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   dot.setAttribute("width", "8");
@@ -585,8 +585,8 @@ export function buildPlainTextSummary(scorecard) {
   const passCount = rules.filter((r) => r.pass).length;
   lines.push(`\nResult: ${passCount} of ${rules.length} rules passed`);
 
-  if (mode === "rules+gemma" && verdicts && verdicts.length > 0) {
-    lines.push("\nGemma 4 Verdicts (advisory)", "-".repeat(28));
+  if ((mode === "rules+ai" || mode === "rules+gemma") && verdicts && verdicts.length > 0) {
+    lines.push("\nAI Verdicts (advisory)", "-".repeat(28));
     for (const v of verdicts) {
       lines.push(`[${v.criterion}] Score: ${v.score}/5`);
       lines.push(`  Reasoning: ${v.reasoning}`);
@@ -600,11 +600,11 @@ export function buildPlainTextSummary(scorecard) {
 
   if (total !== null && typeof total === "number" && isFinite(total)) {
     lines.push(`\nTotal: ${total}`);
-  } else if (mode === "rules+gemma") {
+  } else if (mode === "rules+ai" || mode === "rules+gemma") {
     lines.push("\nTotal: unavailable (some criteria not scored)");
   }
 
-  lines.push("\nJudge model: Gemma 4 (open-weight). No closed models used.");
+  lines.push("\nJudge model: Open-weight AI (Groq, OpenRouter, Ollama).");
   return lines.join("\n");
 }
 
@@ -713,16 +713,17 @@ export function renderResults(scorecard, dataSource) {
   const metaEl = qs("#results-meta");
   if (metaEl) {
     metaEl.textContent = "";
+    const isAi = mode === "rules+ai" || mode === "rules+gemma";
     metaEl.appendChild(
       buildBadge(
-        mode === "rules+gemma" ? "Rules + Gemma 4" : "Rules Only",
-        mode === "rules+gemma" ? "badge--gemma" : "badge--rules"
+        isAi ? "Rules + AI" : "Rules Only",
+        isAi ? "badge--ai" : "badge--rules"
       )
     );
     const timeBadge = buildBadge(`Generated: ${formatDate(generatedAt)}`, "badge--time");
     metaEl.appendChild(timeBadge);
     if (model) {
-      const modelBadge = buildBadge(`Model: ${model.name}`, "badge--gemma");
+      const modelBadge = buildBadge(`Model: ${model.name}`, "badge--ai");
       metaEl.appendChild(modelBadge);
     }
   }
@@ -816,8 +817,8 @@ export function renderResults(scorecard, dataSource) {
 
   announceStatus(
     `Evaluation complete. ${passCount} of ${rules.length} rules passed.` +
-    (mode === "rules+gemma"
-      ? ` ${scoredCount} criteria scored by Gemma 4.`
+    ((mode === "rules+ai" || mode === "rules+gemma")
+      ? ` ${scoredCount} criteria scored by AI.`
       : " Rules Only mode — no AI call was made.")
   );
 }
@@ -826,11 +827,16 @@ export function renderResults(scorecard, dataSource) {
 // § API
 // ============================================================
 
-export async function fetchJudge(url, mode, signal) {
+export async function fetchJudge(url, mode, signal, apiKey) {
+  const payload = { url, mode };
+  if (apiKey && apiKey.trim().length > 0) {
+    payload.apiKey = apiKey.trim();
+  }
+
   const response = await fetch("/api/judge", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url, mode }),
+    body: JSON.stringify(payload),
     signal,
   });
 
@@ -980,8 +986,10 @@ export function initInputPanel() {
       _currentAbortController?.abort();
     }, CLIENT_TIMEOUT_MS);
 
+    const userApiKey = qs("#user-api-key")?.value?.trim();
+
     try {
-      const { scorecard, dataSource } = await fetchJudge(rawUrl, selectedMode, signal);
+      const { scorecard, dataSource } = await fetchJudge(rawUrl, selectedMode, signal, userApiKey);
       clearTimeout(clientTimeout);
 
       _lastScorecard = scorecard;
@@ -1059,9 +1067,11 @@ export function updateNavMode(mode) {
   const badge = qs("#nav-mode-badge");
   const text  = qs("#nav-mode-text");
   if (!badge || !text) return;
-  text.textContent = mode === "rules+gemma" ? "Rules + Gemma 4" : "Rules Only";
+  const isAi = mode === "rules+ai" || mode === "rules+gemma";
+  text.textContent = isAi ? "Rules + AI" : "Rules Only";
   setClass(badge, "is-rules", mode === "rules");
-  setClass(badge, "is-gemma", mode === "rules+gemma");
+  setClass(badge, "is-gemma", isAi);
+  setClass(badge, "is-ai", isAi);
 }
 
 export function initModeSelector() {
@@ -1073,7 +1083,8 @@ export function initModeSelector() {
       _currentMode = radio.value;
       updateNavMode(_currentMode);
       if (gemmaStep) {
-        gemmaStep.style.display = _currentMode === "rules+gemma" ? "" : "none";
+        const isAi = _currentMode === "rules+ai" || _currentMode === "rules+gemma";
+        gemmaStep.style.display = isAi ? "" : "none";
       }
     });
   }
@@ -1156,23 +1167,25 @@ export function initResetButtons() {
 export async function fetchConfig() {
   try {
     const resp = await fetch("/api/config");
-    if (!resp.ok) return { repoUrl: null };
+    if (!resp.ok) return { repoUrl: null, aiAvailable: false, provider: null, model: null };
     const data = await resp.json();
-    if (
-      data &&
-      typeof data.repoUrl === "string" &&
-      data.repoUrl.startsWith("https://github.com/")
-    ) {
-      return { repoUrl: data.repoUrl };
-    }
-    return { repoUrl: null };
+    return {
+      repoUrl:
+        data && typeof data.repoUrl === "string" && data.repoUrl.startsWith("https://github.com/")
+          ? data.repoUrl
+          : null,
+      aiAvailable: Boolean(data?.aiAvailable),
+      provider: data?.provider ?? null,
+      model: data?.model ?? null,
+    };
   } catch {
-    return { repoUrl: null };
+    return { repoUrl: null, aiAvailable: false, provider: null, model: null };
   }
 }
 
 export async function applyConfig() {
-  const { repoUrl } = await fetchConfig();
+  const config = await fetchConfig();
+  const repoUrl = config.repoUrl;
 
   const links = [
     qs("#nav-github-link"),
@@ -1193,6 +1206,36 @@ export async function applyConfig() {
       const label = link.getAttribute("aria-label") ?? "";
       link.setAttribute("aria-label", label.replace("Open", "GitHub repository (link pending) —"));
     }
+  }
+
+  // Handle AI availability
+  const aiRadio = qs("#mode-ai") || qs("#mode-gemma");
+  const aiDisabledMsg = qs("#ai-disabled-msg");
+  const userApiKeyInput = qs("#user-api-key");
+
+  function refreshAIAvailability() {
+    const hasCustomKey = Boolean(userApiKeyInput && userApiKeyInput.value.trim().length > 0);
+    const isAvailable = config.aiAvailable || hasCustomKey;
+
+    if (aiRadio) {
+      if (!isAvailable) {
+        aiRadio.disabled = true;
+        if (aiRadio.checked) {
+          const rulesRadio = qs("#mode-rules");
+          if (rulesRadio) rulesRadio.checked = true;
+        }
+        if (aiDisabledMsg) aiDisabledMsg.style.display = "";
+      } else {
+        aiRadio.disabled = false;
+        if (aiDisabledMsg) aiDisabledMsg.style.display = "none";
+      }
+    }
+  }
+
+  refreshAIAvailability();
+
+  if (userApiKeyInput) {
+    userApiKeyInput.addEventListener("input", refreshAIAvailability);
   }
 }
 

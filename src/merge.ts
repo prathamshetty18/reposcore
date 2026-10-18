@@ -1,6 +1,6 @@
 import {
   CriterionId,
-  GemmaVerdict,
+  AIVerdict,
   RepoSnapshot,
   RuleCheck,
   Scorecard,
@@ -27,10 +27,11 @@ export function rulesScore(rules: RuleCheck[]): Record<CriterionId, number> {
 export function mergeScorecard(
   snap: RepoSnapshot,
   rules: RuleCheck[],
-  verdicts: GemmaVerdict[],
-  mode: "rules" | "rules+gemma",
+  verdicts: AIVerdict[],
+  mode: "rules" | "rules+ai" | "rules+gemma",
   unscored?: CriterionId[],
-  servedBy?: string | null
+  servedBy?: string | null,
+  modelName?: string | null
 ): Scorecard {
   const repo = `${snap.owner}/${snap.name}`;
   const generatedAt = new Date().toISOString();
@@ -57,14 +58,14 @@ export function mergeScorecard(
     return Scorecard.parse(scorecard);
   }
 
-  // mode === "rules+gemma"
+  // mode === "rules+ai" or "rules+gemma"
   if (verdicts.length > 0 && !servedBy) {
     throw new Error(
-      "servedBy required in rules+gemma mode when verdicts exist"
+      `servedBy required in ${mode} mode when verdicts exist`
     );
   }
 
-  const verdictMap = new Map<CriterionId, GemmaVerdict>();
+  const verdictMap = new Map<CriterionId, AIVerdict>();
   for (const verdict of verdicts) {
     verdictMap.set(verdict.criterion, verdict);
   }
@@ -82,28 +83,34 @@ export function mergeScorecard(
   if (finalUnscored.length === 0) {
     let sum = 0;
     for (const criterion of ALL_CRITERIA) {
-      const gScore = verdictMap.get(criterion)!.score;
+      const aiScore = verdictMap.get(criterion)!.score;
       const rScore = rScores[criterion];
       if (rScore !== undefined) {
-        sum += (rScore + gScore) / 2;
+        sum += (rScore + aiScore) / 2;
       } else {
-        sum += gScore;
+        sum += aiScore;
       }
     }
     total = Math.round(sum * 10) / 10;
   }
 
+  const resolvedModelName =
+    modelName ??
+    process.env.AI_MODEL ??
+    process.env.GEMMA_MODEL ??
+    "unknown";
+
   const model = servedBy
     ? {
-        name: process.env.GEMMA_MODEL ?? "unknown",
+        name: resolvedModelName,
         servedBy,
-        openWeight: true as const,
+        openWeight: true,
       }
     : null;
 
   const scorecard: Scorecard = {
     repo,
-    mode: "rules+gemma",
+    mode,
     rules,
     verdicts,
     unscored: finalUnscored,

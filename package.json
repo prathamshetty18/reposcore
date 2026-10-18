@@ -1,7 +1,7 @@
 {
-  "name": "repo-judge",
+  "name": "reposcore",
   "version": "1.0.0",
-  "description": "Judge a public GitHub repo against hackathon criteria using rules plus Gemma 4",
+  "description": "Judge a public GitHub repo against hackathon criteria using deterministic rules plus optional AI",
   "main": "dist/server.js",
   "type": "module",
   "scripts": {
@@ -12,17 +12,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Dragon-looping/Repo-Judge.git"
+    "url": "git+https://github.com/prathamshetty18/reposcore.git"
   },
-  "keywords": ["hackathon", "gemma", "github", "open-source"],
+  "keywords": ["hackathon", "ai", "github", "open-source"],
   "author": "",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/Dragon-looping/Repo-Judge/issues"
+    "url": "https://github.com/prathamshetty18/reposcore/issues"
   },
-  "homepage": "https://github.com/Dragon-looping/Repo-Judge#readme",
+  "homepage": "https://github.com/prathamshetty18/reposcore#readme",
   "dependencies": {
-    "@google/genai": "^2.30.0",
     "@octokit/rest": "^22.0.1",
     "express": "^5.3.0",
     "zod": "^4.6.7"

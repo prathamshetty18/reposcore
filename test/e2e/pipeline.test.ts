@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { mergeScorecard } from "../../src/merge.js";
 import { runRules } from "../../src/rules/index.js";
-import { judge } from "../../src/judge/gemma.js";
+import { judge } from "../../src/judge/ai.js";
 import { loadFixture } from "../../src/ingest/fixtures.js";
 import { CriterionId, GemmaVerdict, Scorecard } from "../../src/schema.js";
 import { bareSnapshot, goodSnapshot, injectionSnapshot } from "./snapshots.js";

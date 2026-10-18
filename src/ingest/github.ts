@@ -182,6 +182,7 @@ export async function buildSnapshot(
 
   // 3. Fetch File Tree (recursive on default branch, capped at 500)
   let fileTree: string[] = [];
+  let commitSha: string | null = null;
   try {
     const treeRes = await octokit.git.getTree({
       owner,
@@ -189,6 +190,10 @@ export async function buildSnapshot(
       tree_sha: defaultBranch,
       recursive: "1",
     });
+
+    if (treeRes.data && typeof (treeRes.data as { sha?: string }).sha === "string") {
+      commitSha = (treeRes.data as { sha?: string }).sha ?? null;
+    }
 
     if (treeRes.data && Array.isArray(treeRes.data.tree)) {
       fileTree = treeRes.data.tree
@@ -327,6 +332,7 @@ export async function buildSnapshot(
     readme,
     fileTree,
     commitCount,
+    commitSha: commitSha ?? null,
     contributors,
     hasCI,
     hasTests,
