@@ -12,7 +12,7 @@ export interface AIProviderPreset {
 export const PROVIDER_PRESETS: Record<string, AIProviderPreset> = {
   groq: {
     baseUrl: "https://api.groq.com/openai/v1",
-    defaultModel: "llama-3.3-70b-versatile",
+    defaultModel: "openai/gpt-oss-120b",
   },
   openrouter: {
     baseUrl: "https://openrouter.ai/api/v1",

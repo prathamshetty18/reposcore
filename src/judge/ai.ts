@@ -227,6 +227,7 @@ export async function judge(
       }
     } catch (err: unknown) {
       clearTimeout(timeoutId);
+      console.error("[ai] error:", err instanceof Error ? err.message : err);
       // On 429, timeout or fatal failure, break retry loop and mark remaining unscored
       if (isRateLimitError(err) || (err instanceof Error && err.name === "AbortError")) {
         break;
@@ -243,6 +244,7 @@ export async function judge(
 
     const parsedObj = extractJsonObject(rawOutput);
     if (!parsedObj) {
+      console.error("[ai] failed to parse JSON from output:", rawOutput.slice(0, 200));
       // Invalid JSON: retry up to MAX_ATTEMPTS
       continue;
     }

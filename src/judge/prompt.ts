@@ -75,7 +75,7 @@ export function buildUserPrompt(snap: RepoSnapshot, rules: RuleCheck[] = []): st
     fileTreeStr = rendered.join("\n");
   }
 
-  const readmeStr = snap.readme ? sanitizeRepoText(snap.readme, 12000) : "none";
+  const readmeStr = snap.readme ? sanitizeRepoText(snap.readme, 6000) : "none";
 
   return `Score the repository below on all 6 criteria and return the JSON object.
 <repo_content>
