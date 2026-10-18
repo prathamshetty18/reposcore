@@ -17,6 +17,7 @@ export const RepoSnapshot = z.object({
   license: z.string().nullable(),
   readme: z.string().nullable(),
   fileTree: z.array(z.string()),
+  fileContents: z.record(z.string(), z.string()).optional(),
   commitCount: z.number(),
   commitSha: z.string().nullable().optional(),
   contributors: z.array(z.object({ login: z.string(), commits: z.number() })),
@@ -45,10 +46,22 @@ export const AIVerdict = z.object({
 // Alias for backwards compatibility
 export const GemmaVerdict = AIVerdict;
 
+export const CustomRuleResult = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().optional(),
+  check: z.string(),
+  pass: z.boolean(),
+  evidence: z.string(),
+  severity: z.enum(["low", "medium", "high"]).optional(),
+  weight: z.number().optional(),
+});
+
 export const Scorecard = z.object({
   repo: z.string(),
   mode: z.enum(["rules", "rules+ai", "rules+gemma"]),
   rules: z.array(RuleCheck),
+  customRules: z.array(CustomRuleResult).optional().default([]),
   verdicts: z.array(AIVerdict),
   unscored: z.array(CriterionId),
   total: z.number().nullable(),
@@ -65,4 +78,5 @@ export type RepoSnapshot = z.infer<typeof RepoSnapshot>;
 export type RuleCheck = z.infer<typeof RuleCheck>;
 export type AIVerdict = z.infer<typeof AIVerdict>;
 export type GemmaVerdict = z.infer<typeof GemmaVerdict>;
+export type CustomRuleResult = z.infer<typeof CustomRuleResult>;
 export type Scorecard = z.infer<typeof Scorecard>;

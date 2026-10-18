@@ -566,7 +566,7 @@ export function buildScoreRing(score) {
 }
 
 export function buildPlainTextSummary(scorecard) {
-  const { repo, mode, rules, verdicts, unscored, total, generatedAt } = scorecard;
+  const { repo, mode, rules, verdicts, unscored, total, generatedAt, customRules } = scorecard;
   const lines = [
     "RepoJudge Evaluation Summary",
     "============================",
@@ -598,8 +598,17 @@ export function buildPlainTextSummary(scorecard) {
     lines.push(`\nNot scored: ${unscored.join(", ")}`);
   }
 
+  if (customRules && customRules.length > 0) {
+    lines.push("\nCustom Specification Checks", "-".repeat(28));
+    for (const cr of customRules) {
+      lines.push(`[${cr.pass ? "PASS" : "FAIL"}] ${cr.name || cr.id} (${cr.type}): ${cr.evidence}`);
+    }
+    const crPass = customRules.filter((r) => r.pass).length;
+    lines.push(`Result: ${crPass} of ${customRules.length} custom checks passed`);
+  }
+
   if (total !== null && typeof total === "number" && isFinite(total)) {
-    lines.push(`\nTotal: ${total}`);
+    lines.push(`\nTotal Score: ${total} / 30`);
   } else if (mode === "rules+ai" || mode === "rules+gemma") {
     lines.push("\nTotal: unavailable (some criteria not scored)");
   }
@@ -735,10 +744,10 @@ export function renderResults(scorecard, dataSource) {
     if (mode === "rules") {
       const totalWrap = h("div", { class: "results-total" });
       const lbl = h("span", { class: "results-total__label" });
-      lbl.textContent = "Total";
+      lbl.textContent = "Built-in Total";
       const val = h("span", { class: "results-total__value" });
       if (typeof total === "number" && isFinite(total)) {
-        val.textContent = String(total);
+        val.textContent = `${total} / 30`;
       } else {
         val.textContent = "—";
       }
@@ -748,9 +757,9 @@ export function renderResults(scorecard, dataSource) {
     } else if (total !== null && typeof total === "number" && isFinite(total)) {
       const totalWrap = h("div", { class: "results-total" });
       const lbl = h("span", { class: "results-total__label" });
-      lbl.textContent = "Total";
+      lbl.textContent = "Built-in Total";
       const val = h("span", { class: "results-total__value" });
-      val.textContent = String(total);
+      val.textContent = `${total} / 30`;
       totalWrap.appendChild(lbl);
       totalWrap.appendChild(val);
       totalBlock.appendChild(totalWrap);
@@ -807,6 +816,64 @@ export function renderResults(scorecard, dataSource) {
     }
   }
 
+  // Custom checks section
+  const customSection = qs("#custom-checks-section");
+  const customBadge = qs("#custom-checks-badge");
+  const customGrid = qs("#custom-checks-grid");
+  const customResults = scorecard.customRules ?? [];
+
+  if (customSection && customGrid) {
+    if (customResults.length > 0) {
+      customSection.style.display = "";
+      if (customBadge) {
+        customBadge.textContent = `${customResults.length} check${customResults.length === 1 ? "" : "s"}`;
+      }
+      customGrid.textContent = "";
+
+      for (const cr of customResults) {
+        const card = h("div", {
+          class: `custom-check-card ${cr.pass ? "custom-check-card--pass" : "custom-check-card--fail"}`,
+          role: "listitem",
+        });
+
+        const top = h("div", { class: "custom-check-card__top" });
+        const nameGroup = h("div", { class: "custom-check-card__name" });
+        nameGroup.appendChild(makeCheckOrXIcon(cr.pass));
+
+        const titleText = h("span");
+        titleText.textContent = cr.name || cr.id;
+        nameGroup.appendChild(titleText);
+
+        const typeBadge = h("span", { class: "custom-rule-item__type" });
+        typeBadge.textContent = cr.type;
+        nameGroup.appendChild(typeBadge);
+
+        const passBadge = h("span", {
+          class: `custom-check-card__badge ${cr.pass ? "custom-check-card__badge--pass" : "custom-check-card__badge--fail"}`,
+        });
+        passBadge.textContent = cr.pass ? "PASS" : "FAIL";
+
+        top.appendChild(nameGroup);
+        top.appendChild(passBadge);
+        card.appendChild(top);
+
+        if (cr.description) {
+          const desc = h("p", { class: "custom-check-card__desc" });
+          desc.textContent = cr.description;
+          card.appendChild(desc);
+        }
+
+        const evidence = h("div", { class: "custom-check-card__evidence" });
+        evidence.textContent = cr.evidence || "No evidence recorded.";
+        card.appendChild(evidence);
+
+        customGrid.appendChild(card);
+      }
+    } else {
+      customSection.style.display = "none";
+    }
+  }
+
   initReveal();
 
   const heading = qs("#results-heading");
@@ -817,6 +884,7 @@ export function renderResults(scorecard, dataSource) {
 
   announceStatus(
     `Evaluation complete. ${passCount} of ${rules.length} rules passed.` +
+    (customResults.length > 0 ? ` ${customResults.filter((r) => r.pass).length} of ${customResults.length} custom checks passed.` : "") +
     ((mode === "rules+ai" || mode === "rules+gemma")
       ? ` ${scoredCount} criteria scored by AI.`
       : " Rules Only mode — no AI call was made.")
@@ -827,10 +895,13 @@ export function renderResults(scorecard, dataSource) {
 // § API
 // ============================================================
 
-export async function fetchJudge(url, mode, signal, apiKey) {
+export async function fetchJudge(url, mode, signal, apiKey, customRules) {
   const payload = { url, mode };
   if (apiKey && apiKey.trim().length > 0) {
     payload.apiKey = apiKey.trim();
+  }
+  if (customRules && Array.isArray(customRules) && customRules.length > 0) {
+    payload.customRules = customRules;
   }
 
   const response = await fetch("/api/judge", {
@@ -904,6 +975,616 @@ let _lastScorecard = null;
 
 export function getLastScorecard() { return _lastScorecard; }
 export function setLastScorecard(sc) { _lastScorecard = sc; }
+
+// ============================================================
+// § CUSTOM RULES MANAGEMENT
+// ============================================================
+
+export const DEFAULT_CUSTOM_RULES = [
+  {
+    id: "custom.env_missing",
+    name: "No Committed Secrets (.env Missing)",
+    description: "Ensure that sensitive .env files are not checked into the repository",
+    type: "file_missing",
+    path: ".env",
+    weight: 1,
+  },
+  {
+    id: "custom.readme_has_license",
+    name: "README Mentions License",
+    description: "Check if the README contains a License section",
+    type: "file_contains",
+    path: "README.md",
+    pattern: "license",
+    isRegex: false,
+    weight: 1,
+  },
+  {
+    id: "custom.source_ts_count",
+    name: "Source Files Minimum Count",
+    description: "Ensure that there are at least 3 TypeScript files in src",
+    type: "file_count",
+    pattern: "src/**/*.ts",
+    min: 3,
+    weight: 1,
+  },
+];
+
+const LOCAL_STORAGE_RULES_KEY = "reposcore_custom_rules";
+
+export function loadCustomRules() {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_RULES_KEY);
+    if (!raw) return DEFAULT_CUSTOM_RULES;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed;
+    }
+    return DEFAULT_CUSTOM_RULES;
+  } catch {
+    return DEFAULT_CUSTOM_RULES;
+  }
+}
+
+export function saveCustomRules(rules) {
+  try {
+    localStorage.setItem(LOCAL_STORAGE_RULES_KEY, JSON.stringify(rules));
+  } catch (err) {
+    console.error("Failed to save custom rules:", err);
+  }
+}
+
+function getRuleSummaryDetails(rule) {
+  switch (rule.type) {
+    case "file_exists":
+    case "file_missing":
+      return `Path: ${rule.path || ""}`;
+    case "file_contains":
+      return `Path: ${rule.path || ""} | Pattern: "${rule.pattern || ""}"${rule.isRegex ? " (regex)" : ""}`;
+    case "file_count":
+      return `Glob: ${rule.pattern || ""} | Min: ${rule.min ?? "—"}, Max: ${rule.max ?? "—"}`;
+    case "json_field_equals":
+      return `${rule.path || ""} → ${rule.field || ""} = ${JSON.stringify(rule.expectedValue)}`;
+    default:
+      return "";
+  }
+}
+
+function renderRuleParamsForm(container, type, initial = {}) {
+  container.textContent = "";
+
+  if (type === "file_exists" || type === "file_missing") {
+    const field = h("div", { class: "custom-rule-form__field" });
+    const lbl = h("label", { for: "rule-param-path" });
+    lbl.textContent = type === "file_exists" ? "File Path to Check" : "Forbidden File Path";
+    const inp = h("input", {
+      type: "text",
+      id: "rule-param-path",
+      class: "input-text",
+      value: initial.path || (type === "file_missing" ? ".env" : "Dockerfile"),
+      placeholder: "e.g. Dockerfile or .env",
+    });
+    field.appendChild(lbl);
+    field.appendChild(inp);
+    container.appendChild(field);
+  } else if (type === "file_contains") {
+    const row = h("div", { class: "custom-rule-form__row" });
+    const pathField = h("div", { class: "custom-rule-form__field" });
+    const pathLbl = h("label", { for: "rule-param-path" });
+    pathLbl.textContent = "File Path";
+    const pathInp = h("input", {
+      type: "text",
+      id: "rule-param-path",
+      class: "input-text",
+      value: initial.path || "README.md",
+      placeholder: "e.g. README.md",
+    });
+    pathField.appendChild(pathLbl);
+    pathField.appendChild(pathInp);
+
+    const patField = h("div", { class: "custom-rule-form__field" });
+    const patLbl = h("label", { for: "rule-param-pattern" });
+    patLbl.textContent = "Pattern / String to Match";
+    const patInp = h("input", {
+      type: "text",
+      id: "rule-param-pattern",
+      class: "input-text",
+      value: initial.pattern || "",
+      placeholder: "e.g. License or v[0-9]+",
+    });
+    patField.appendChild(patLbl);
+    patField.appendChild(patInp);
+
+    row.appendChild(pathField);
+    row.appendChild(patField);
+    container.appendChild(row);
+
+    const regexWrap = h("div", { style: "margin-top:0.4rem; display:flex; align-items:center; gap:0.5rem;" });
+    const chk = h("input", {
+      type: "checkbox",
+      id: "rule-param-is-regex",
+    });
+    if (initial.isRegex) chk.setAttribute("checked", "true");
+    const chkLbl = h("label", { for: "rule-param-is-regex", style: "font-size:11px; font-family:var(--font-mono); color:var(--c-text-secondary); cursor:pointer;" });
+    chkLbl.textContent = "Treat Pattern as Regular Expression";
+    regexWrap.appendChild(chk);
+    regexWrap.appendChild(chkLbl);
+    container.appendChild(regexWrap);
+  } else if (type === "file_count") {
+    const patField = h("div", { class: "custom-rule-form__field" });
+    const patLbl = h("label", { for: "rule-param-pattern" });
+    patLbl.textContent = "Glob Pattern";
+    const patInp = h("input", {
+      type: "text",
+      id: "rule-param-pattern",
+      class: "input-text",
+      value: initial.pattern || "src/**/*.ts",
+      placeholder: "e.g. src/**/*.ts or docs/**/*.md",
+    });
+    patField.appendChild(patLbl);
+    patField.appendChild(patInp);
+    container.appendChild(patField);
+
+    const row = h("div", { class: "custom-rule-form__row", style: "margin-top:0.4rem;" });
+    const minField = h("div", { class: "custom-rule-form__field" });
+    const minLbl = h("label", { for: "rule-param-min" });
+    minLbl.textContent = "Minimum Count (optional)";
+    const minInp = h("input", {
+      type: "number",
+      id: "rule-param-min",
+      class: "input-text",
+      min: "0",
+      value: initial.min !== undefined ? String(initial.min) : "",
+      placeholder: "e.g. 1",
+    });
+    minField.appendChild(minLbl);
+    minField.appendChild(minInp);
+
+    const maxField = h("div", { class: "custom-rule-form__field" });
+    const maxLbl = h("label", { for: "rule-param-max" });
+    maxLbl.textContent = "Maximum Count (optional)";
+    const maxInp = h("input", {
+      type: "number",
+      id: "rule-param-max",
+      class: "input-text",
+      min: "0",
+      value: initial.max !== undefined ? String(initial.max) : "",
+      placeholder: "e.g. 100",
+    });
+    maxField.appendChild(maxLbl);
+    maxField.appendChild(maxInp);
+
+    row.appendChild(minField);
+    row.appendChild(maxField);
+    container.appendChild(row);
+  } else if (type === "json_field_equals") {
+    const row = h("div", { class: "custom-rule-form__row" });
+    const pathField = h("div", { class: "custom-rule-form__field" });
+    const pathLbl = h("label", { for: "rule-param-path" });
+    pathLbl.textContent = "JSON File Path";
+    const pathInp = h("input", {
+      type: "text",
+      id: "rule-param-path",
+      class: "input-text",
+      value: initial.path || "package.json",
+      placeholder: "e.g. package.json",
+    });
+    pathField.appendChild(pathLbl);
+    pathField.appendChild(pathInp);
+
+    const fieldField = h("div", { class: "custom-rule-form__field" });
+    const fieldLbl = h("label", { for: "rule-param-field" });
+    fieldLbl.textContent = "JSON Field (Dot Notation)";
+    const fieldInp = h("input", {
+      type: "text",
+      id: "rule-param-field",
+      class: "input-text",
+      value: initial.field || "license",
+      placeholder: "e.g. license or scripts.test",
+    });
+    fieldField.appendChild(fieldLbl);
+    fieldField.appendChild(fieldInp);
+
+    row.appendChild(pathField);
+    row.appendChild(fieldField);
+    container.appendChild(row);
+
+    const expField = h("div", { class: "custom-rule-form__field", style: "margin-top:0.4rem;" });
+    const expLbl = h("label", { for: "rule-param-expected" });
+    expLbl.textContent = "Expected Value (Text, Number, or Boolean)";
+    const expInp = h("input", {
+      type: "text",
+      id: "rule-param-expected",
+      class: "input-text",
+      value: initial.expectedValue !== undefined ? String(initial.expectedValue) : "MIT",
+      placeholder: "e.g. MIT, true, or 18",
+    });
+    expField.appendChild(expLbl);
+    expField.appendChild(expInp);
+    container.appendChild(expField);
+  }
+}
+
+export function initCustomRulesPanel() {
+  const panel = qs("#custom-rules-panel");
+  const toggleBtn = qs("#custom-rules-toggle-btn");
+  const panelBody = qs("#custom-rules-panel-body");
+  const countBadge = qs("#custom-rules-count-badge");
+  const listEl = qs("#custom-rules-list");
+  const formEl = qs("#custom-rule-form");
+  const formTitle = qs("#rule-form-title");
+  const errorEl = qs("#custom-rule-error");
+
+  const inputId = qs("#rule-input-id");
+  const inputName = qs("#rule-input-name");
+  const inputDesc = qs("#rule-input-desc");
+  const inputType = qs("#rule-input-type");
+  const inputWeight = qs("#rule-input-weight");
+  const paramsContainer = qs("#custom-rule-params-container");
+
+  const btnAddNew = qs("#rule-add-new-btn");
+  const btnSave = qs("#rule-save-btn");
+  const btnCancel = qs("#rule-cancel-btn");
+  const btnExport = qs("#rule-export-btn");
+  const btnImport = qs("#rule-import-btn");
+  const fileImport = qs("#rule-import-file");
+  const btnReset = qs("#rule-reset-btn");
+
+  if (!panel || !toggleBtn || !panelBody) return;
+
+  let currentRules = loadCustomRules();
+  let editingRuleId = null;
+
+  // Toggle accordion
+  toggleBtn.addEventListener("click", () => {
+    const isExpanded = toggleBtn.getAttribute("aria-expanded") === "true";
+    toggleBtn.setAttribute("aria-expanded", String(!isExpanded));
+    panelBody.style.display = isExpanded ? "none" : "";
+    setClass(toggleBtn, "is-expanded", !isExpanded);
+  });
+
+  toggleBtn.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      toggleBtn.click();
+    }
+  });
+
+  function renderList() {
+    if (!listEl) return;
+    listEl.textContent = "";
+
+    if (countBadge) {
+      countBadge.textContent = `${currentRules.length} rule${currentRules.length === 1 ? "" : "s"}`;
+    }
+
+    if (currentRules.length === 0) {
+      const empty = h("p", { style: "font-size:12px; color:var(--c-text-tertiary); padding:0.5rem;" });
+      empty.textContent = "No custom rules defined. Click '+ Add Rule' or 'Reset Defaults' to get started.";
+      listEl.appendChild(empty);
+      return;
+    }
+
+    for (const rule of currentRules) {
+      const item = h("div", { class: "custom-rule-item", role: "listitem" });
+
+      const info = h("div", { class: "custom-rule-item__info" });
+      const nameLine = h("div", { class: "custom-rule-item__name" });
+
+      const nameText = h("span");
+      nameText.textContent = rule.name || rule.id;
+      nameLine.appendChild(nameText);
+
+      const typeBadge = h("span", { class: "custom-rule-item__type" });
+      typeBadge.textContent = rule.type;
+      nameLine.appendChild(typeBadge);
+
+      info.appendChild(nameLine);
+
+      const detailsLine = h("div", { class: "custom-rule-item__details" });
+      detailsLine.textContent = `[${rule.id}] ${getRuleSummaryDetails(rule)}`;
+      info.appendChild(detailsLine);
+
+      item.appendChild(info);
+
+      const actions = h("div", { class: "custom-rule-item__actions" });
+
+      const editBtn = h("button", {
+        type: "button",
+        class: "btn-icon",
+        title: "Edit rule",
+        "aria-label": `Edit rule ${rule.id}`,
+      });
+      const editSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      editSvg.setAttribute("width", "13");
+      editSvg.setAttribute("height", "13");
+      editSvg.setAttribute("viewBox", "0 0 24 24");
+      editSvg.setAttribute("fill", "none");
+      editSvg.setAttribute("stroke", "currentColor");
+      editSvg.setAttribute("stroke-width", "2");
+      editSvg.setAttribute("stroke-linecap", "round");
+      editSvg.setAttribute("stroke-linejoin", "round");
+      const pathPencil = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      pathPencil.setAttribute("d", "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7");
+      const pathPencil2 = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      pathPencil2.setAttribute("d", "M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z");
+      editSvg.appendChild(pathPencil);
+      editSvg.appendChild(pathPencil2);
+      editBtn.appendChild(editSvg);
+
+      editBtn.addEventListener("click", () => {
+        openEditForm(rule);
+      });
+      actions.appendChild(editBtn);
+
+      const deleteBtn = h("button", {
+        type: "button",
+        class: "btn-icon btn-icon--delete",
+        title: "Delete rule",
+        "aria-label": `Delete rule ${rule.id}`,
+      });
+      const delSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      delSvg.setAttribute("width", "13");
+      delSvg.setAttribute("height", "13");
+      delSvg.setAttribute("viewBox", "0 0 24 24");
+      delSvg.setAttribute("fill", "none");
+      delSvg.setAttribute("stroke", "currentColor");
+      delSvg.setAttribute("stroke-width", "2");
+      delSvg.setAttribute("stroke-linecap", "round");
+      delSvg.setAttribute("stroke-linejoin", "round");
+      const delLine1 = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      delLine1.setAttribute("x1", "18"); delLine1.setAttribute("y1", "6");
+      delLine1.setAttribute("x2", "6");  delLine1.setAttribute("y2", "18");
+      const delLine2 = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      delLine2.setAttribute("x1", "6");  delLine2.setAttribute("y1", "6");
+      delLine2.setAttribute("x2", "18"); delLine2.setAttribute("y2", "18");
+      delSvg.appendChild(delLine1);
+      delSvg.appendChild(delLine2);
+      deleteBtn.appendChild(delSvg);
+
+      deleteBtn.addEventListener("click", () => {
+        currentRules = currentRules.filter((r) => r.id !== rule.id);
+        saveCustomRules(currentRules);
+        renderList();
+        announceStatus(`Deleted rule ${rule.id}`);
+      });
+      actions.appendChild(deleteBtn);
+
+      item.appendChild(actions);
+      listEl.appendChild(item);
+    }
+  }
+
+  function openCreateForm() {
+    editingRuleId = null;
+    if (formTitle) formTitle.textContent = "Add Custom Rule";
+    if (inputId) {
+      inputId.value = `custom.rule_${Date.now().toString().slice(-4)}`;
+      inputId.disabled = false;
+    }
+    if (inputName) inputName.value = "";
+    if (inputDesc) inputDesc.value = "";
+    if (inputType) inputType.value = "file_exists";
+    if (inputWeight) inputWeight.value = "1";
+    if (errorEl) errorEl.style.display = "none";
+    if (paramsContainer) renderRuleParamsForm(paramsContainer, "file_exists");
+    if (formEl) formEl.style.display = "";
+    inputId?.focus();
+  }
+
+  function openEditForm(rule) {
+    editingRuleId = rule.id;
+    if (formTitle) formTitle.textContent = "Edit Custom Rule";
+    if (inputId) {
+      inputId.value = rule.id;
+      inputId.disabled = true;
+    }
+    if (inputName) inputName.value = rule.name || "";
+    if (inputDesc) inputDesc.value = rule.description || "";
+    if (inputType) inputType.value = rule.type;
+    if (inputWeight) inputWeight.value = String(rule.weight ?? 1);
+    if (errorEl) errorEl.style.display = "none";
+    if (paramsContainer) renderRuleParamsForm(paramsContainer, rule.type, rule);
+    if (formEl) formEl.style.display = "";
+    inputName?.focus();
+  }
+
+  function closeForm() {
+    editingRuleId = null;
+    if (formEl) formEl.style.display = "none";
+    if (errorEl) errorEl.style.display = "none";
+  }
+
+  inputType?.addEventListener("change", () => {
+    if (paramsContainer) renderRuleParamsForm(paramsContainer, inputType.value);
+  });
+
+  btnAddNew?.addEventListener("click", openCreateForm);
+  btnCancel?.addEventListener("click", closeForm);
+
+  btnSave?.addEventListener("click", () => {
+    const id = inputId?.value?.trim() || "";
+    const name = inputName?.value?.trim() || "";
+    const description = inputDesc?.value?.trim() || undefined;
+    const type = inputType?.value || "file_exists";
+    const weight = parseInt(inputWeight?.value || "1", 10) || 1;
+
+    if (!id) {
+      showRuleError("Rule ID is required (e.g. custom.my_rule).");
+      return;
+    }
+    if (!/^[a-zA-Z0-9_.-]+$/.test(id)) {
+      showRuleError("Rule ID may only contain letters, numbers, dots, hyphens, and underscores.");
+      return;
+    }
+    if (!name) {
+      showRuleError("Rule Name is required.");
+      return;
+    }
+
+    if (editingRuleId === null && currentRules.some((r) => r.id === id)) {
+      showRuleError(`A rule with ID '${id}' already exists.`);
+      return;
+    }
+
+    const newRule = { id, name, type, weight };
+    if (description) newRule.description = description;
+
+    if (type === "file_exists" || type === "file_missing") {
+      const p = qs("#rule-param-path")?.value?.trim();
+      if (!p) {
+        showRuleError("File path is required.");
+        return;
+      }
+      newRule.path = p;
+    } else if (type === "file_contains") {
+      const p = qs("#rule-param-path")?.value?.trim();
+      const pat = qs("#rule-param-pattern")?.value?.trim();
+      const isRegex = qs("#rule-param-is-regex")?.checked || false;
+      if (!p) {
+        showRuleError("File path is required.");
+        return;
+      }
+      if (!pat) {
+        showRuleError("Pattern to match is required.");
+        return;
+      }
+      if (isRegex) {
+        try {
+          new RegExp(pat);
+        } catch (e) {
+          showRuleError(`Invalid regular expression: ${e.message}`);
+          return;
+        }
+      }
+      newRule.path = p;
+      newRule.pattern = pat;
+      if (isRegex) newRule.isRegex = true;
+    } else if (type === "file_count") {
+      const pat = qs("#rule-param-pattern")?.value?.trim();
+      const minVal = qs("#rule-param-min")?.value?.trim();
+      const maxVal = qs("#rule-param-max")?.value?.trim();
+      if (!pat) {
+        showRuleError("Glob pattern is required.");
+        return;
+      }
+      if ((minVal === "" || minVal === undefined) && (maxVal === "" || maxVal === undefined)) {
+        showRuleError("At least one of Min Count or Max Count must be specified.");
+        return;
+      }
+      newRule.pattern = pat;
+      if (minVal !== "" && minVal !== undefined) newRule.min = parseInt(minVal, 10);
+      if (maxVal !== "" && maxVal !== undefined) newRule.max = parseInt(maxVal, 10);
+    } else if (type === "json_field_equals") {
+      const p = qs("#rule-param-path")?.value?.trim();
+      const f = qs("#rule-param-field")?.value?.trim();
+      const exp = qs("#rule-param-expected")?.value?.trim();
+      if (!p) {
+        showRuleError("JSON file path is required.");
+        return;
+      }
+      if (!f) {
+        showRuleError("JSON field path is required.");
+        return;
+      }
+      if (exp === undefined || exp === "") {
+        showRuleError("Expected value is required.");
+        return;
+      }
+      newRule.path = p;
+      newRule.field = f;
+      if (exp === "true") newRule.expectedValue = true;
+      else if (exp === "false") newRule.expectedValue = false;
+      else if (!isNaN(Number(exp)) && exp !== "") newRule.expectedValue = Number(exp);
+      else newRule.expectedValue = exp;
+    }
+
+    if (editingRuleId !== null) {
+      currentRules = currentRules.map((r) => (r.id === editingRuleId ? newRule : r));
+    } else {
+      currentRules.push(newRule);
+    }
+
+    saveCustomRules(currentRules);
+    renderList();
+    closeForm();
+    announceStatus(`Saved rule ${newRule.id}`);
+  });
+
+  function showRuleError(msg) {
+    if (!errorEl) return;
+    errorEl.textContent = msg;
+    errorEl.style.display = "";
+  }
+
+  // Export JSON
+  btnExport?.addEventListener("click", () => {
+    const blob = new Blob([JSON.stringify(currentRules, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "rules.json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    announceStatus("Exported rules.json");
+  });
+
+  // Import JSON
+  btnImport?.addEventListener("click", () => {
+    fileImport?.click();
+  });
+
+  fileImport?.addEventListener("change", (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const parsed = JSON.parse(evt.target.result);
+        if (!Array.isArray(parsed)) {
+          alert("Import failed: JSON file must contain an array of rules.");
+          return;
+        }
+        const validRules = [];
+        for (const r of parsed) {
+          if (r && typeof r === "object" && typeof r.id === "string" && typeof r.type === "string") {
+            validRules.push(r);
+          }
+        }
+        if (validRules.length === 0) {
+          alert("Import failed: No valid rules found in JSON file.");
+          return;
+        }
+        currentRules = validRules;
+        saveCustomRules(currentRules);
+        renderList();
+        announceStatus(`Imported ${validRules.length} rules.`);
+      } catch (err) {
+        alert("Import failed: Invalid JSON format.");
+      } finally {
+        fileImport.value = "";
+      }
+    };
+    reader.readAsText(file);
+  });
+
+  // Reset Defaults
+  btnReset?.addEventListener("click", () => {
+    if (confirm("Reset custom rules to default templates?")) {
+      currentRules = [...DEFAULT_CUSTOM_RULES];
+      saveCustomRules(currentRules);
+      renderList();
+      closeForm();
+      announceStatus("Reset custom rules to defaults.");
+    }
+  });
+
+  // Initial render
+  renderList();
+}
 
 // ============================================================
 // § INPUT PANEL & SAMPLE LINKS
@@ -989,7 +1670,8 @@ export function initInputPanel() {
     const userApiKey = qs("#user-api-key")?.value?.trim();
 
     try {
-      const { scorecard, dataSource } = await fetchJudge(rawUrl, selectedMode, signal, userApiKey);
+      const customRules = loadCustomRules();
+      const { scorecard, dataSource } = await fetchJudge(rawUrl, selectedMode, signal, userApiKey, customRules);
       clearTimeout(clientTimeout);
 
       _lastScorecard = scorecard;
@@ -1517,6 +2199,10 @@ if (typeof globalThis !== "undefined") {
     buildPlainTextSummary,
     renderResults,
     buildBadge,
+    DEFAULT_CUSTOM_RULES,
+    loadCustomRules,
+    saveCustomRules,
+    initCustomRulesPanel,
   };
 }
 
@@ -1529,6 +2215,7 @@ function init() {
   initNav();
   initActiveLinks();
   initInputPanel();
+  initCustomRulesPanel();
   initModeSelector();
   initResetButtons();
   initCopyButton();

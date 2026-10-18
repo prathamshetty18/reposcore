@@ -93,15 +93,14 @@ You can run the server immediately without configuring any AI keys:
 GITHUB_TOKEN=ghp_your_token_here
 ```
 
-#### Option 2: Groq Setup (Ultra-Fast Free Tier)
+#### Option 2: Groq Setup (Recommended — Ultra-Fast)
 1. Sign up for a free key at [console.groq.com](https://console.groq.com/).
 2. In `.env`:
    ```env
-   AI_PROVIDER=groq
-   AI_BASE_URL=https://api.groq.com/openai/v1
+   GROQ_API_KEY=gsk_your_groq_api_key_here
    AI_MODEL=llama-3.3-70b-versatile
-   AI_API_KEY=gsk_your_groq_api_key
    ```
+   *(Alternatively, configure generic `AI_PROVIDER=groq`, `AI_BASE_URL=https://api.groq.com/openai/v1`, and `AI_API_KEY`)*
 
 #### Option 3: OpenRouter Setup (Free Model Access)
 1. Obtain an API key at [openrouter.ai](https://openrouter.ai/).
@@ -130,6 +129,103 @@ GITHUB_TOKEN=ghp_your_token_here
 
 ---
 
+## Custom Rules Engine
+
+RepoJudge features a declarative, secure custom rules engine (zero `eval`, zero code execution) allowing evaluators to enforce project-specific requirements without changing the core codebase.
+
+### Key Principles
+- **Deterministic & Safe**: Evaluated purely against verified file tree snapshots and metadata. No arbitrary code execution.
+- **Independent Scoring**: The built-in score remains strictly out of 30. Custom rules are evaluated and reported in a separate "Custom specification checks" section (with PASS/FAIL status and concrete evidence).
+- **AI Non-Overridable**: AI models can never override or bypass custom rule results.
+- **Multiple Sources**: Custom rules can be placed in `rules.json` at the root of the project, or added and managed dynamically in the browser UI (with `localStorage` persistence, JSON export, and import).
+
+### Supported Check Types
+
+#### 1. `file_exists`
+Verifies that a mandatory file exists in the repository.
+```json
+{
+  "id": "custom.has_dockerfile",
+  "name": "Dockerfile Exists",
+  "check": "file_exists",
+  "params": {
+    "path": "Dockerfile"
+  },
+  "severity": "medium",
+  "weight": 1
+}
+```
+
+#### 2. `file_missing`
+Ensures forbidden or sensitive files are NOT tracked in git.
+```json
+{
+  "id": "custom.env_missing",
+  "name": "No Committed .env Files",
+  "description": "Ensures environment files with sensitive keys are not tracked in git",
+  "check": "file_missing",
+  "params": {
+    "path": ".env"
+  },
+  "severity": "high",
+  "weight": 2
+}
+```
+
+#### 3. `file_contains`
+Checks whether a file contains a specific text string or matches a regular expression.
+```json
+{
+  "id": "custom.readme_has_license",
+  "name": "README License Mention",
+  "description": "Verifies that the README mentions licensing or MIT",
+  "check": "file_contains",
+  "params": {
+    "path": "README.md",
+    "pattern": "MIT",
+    "isRegex": false
+  },
+  "severity": "medium",
+  "weight": 1
+}
+```
+
+#### 4. `file_count`
+Counts files matching a glob pattern and verifies minimum or maximum thresholds.
+```json
+{
+  "id": "custom.source_ts_count",
+  "name": "TypeScript Source Files Count",
+  "description": "Verifies that the repository contains at least 1 source file in src/",
+  "check": "file_count",
+  "params": {
+    "glob": "src/**/*.ts",
+    "min": 1
+  },
+  "severity": "medium",
+  "weight": 1
+}
+```
+
+#### 5. `json_field_equals`
+Inspects a JSON file (e.g. `package.json`) using dot-notation field traversal and compares against an expected value.
+```json
+{
+  "id": "custom.package_license",
+  "name": "Package JSON License",
+  "check": "json_field_equals",
+  "params": {
+    "path": "package.json",
+    "field": "license",
+    "value": "MIT"
+  },
+  "severity": "medium",
+  "weight": 1
+}
+```
+
+---
+
 ## Run
 
 | Command | Description |
@@ -149,6 +245,7 @@ GITHUB_TOKEN=ghp_your_token_here
 | Web server | Express 5 |
 | GitHub API | @octokit/rest |
 | AI layer | OpenAI-compatible chat completions (Groq, OpenRouter, Ollama) |
+| Custom rules | Declarative Zod schema + deterministic AST-safe engine |
 | Schema / validation | Zod |
 | Testing | Vitest |
 

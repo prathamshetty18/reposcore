@@ -31,7 +31,8 @@ export function mergeScorecard(
   mode: "rules" | "rules+ai" | "rules+gemma",
   unscored?: CriterionId[],
   servedBy?: string | null,
-  modelName?: string | null
+  modelName?: string | null,
+  customRules?: import("./schema.js").CustomRuleResult[]
 ): Scorecard {
   const repo = `${snap.owner}/${snap.name}`;
   const generatedAt = new Date().toISOString();
@@ -48,6 +49,7 @@ export function mergeScorecard(
       repo,
       mode: "rules",
       rules,
+      customRules: customRules ?? [],
       verdicts: [],
       unscored: [],
       total,
@@ -112,6 +114,7 @@ export function mergeScorecard(
     repo,
     mode,
     rules,
+    customRules: customRules ?? [],
     verdicts,
     unscored: finalUnscored,
     total,

@@ -35,8 +35,8 @@ export function isAIConfigured(
   env: NodeJS.ProcessEnv = process.env,
   userApiKey?: string
 ): boolean {
-  const provider = (env.AI_PROVIDER || "").toLowerCase().trim();
-  const apiKey = (userApiKey || env.AI_API_KEY || env.GEMINI_API_KEY || "").trim();
+  const provider = (env.AI_PROVIDER || "groq").toLowerCase().trim();
+  const apiKey = (userApiKey || env.GROQ_API_KEY || env.AI_API_KEY || env.GEMINI_API_KEY || "").trim();
 
   if (provider === "ollama") {
     return true;
@@ -59,9 +59,9 @@ export function resolveAIConfig(
     providerRaw in PROVIDER_PRESETS ? (providerRaw as AIProviderName) : "custom";
 
   const preset = PROVIDER_PRESETS[provider];
-  const baseUrl = (env.AI_BASE_URL || preset?.baseUrl || "").trim().replace(/\/+$/, "");
+  const baseUrl = (env.AI_BASE_URL || preset?.baseUrl || "https://api.groq.com/openai/v1").trim().replace(/\/+$/, "");
   const model = env.AI_MODEL || env.GEMMA_MODEL || preset?.defaultModel || "llama-3.3-70b-versatile";
-  const apiKey = (userApiKey || env.AI_API_KEY || env.GEMINI_API_KEY || "").trim();
+  const apiKey = (userApiKey || env.GROQ_API_KEY || env.AI_API_KEY || env.GEMINI_API_KEY || "").trim();
 
   if (!baseUrl) {
     throw new Error("AI_BASE_URL is required or a valid AI_PROVIDER preset must be set");
@@ -70,7 +70,7 @@ export function resolveAIConfig(
   // Ollama or local URLs do not require an API key
   const isLocal = baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1");
   if (provider !== "ollama" && !isLocal && !apiKey) {
-    throw new Error(`AI_API_KEY is required for provider "${provider}"`);
+    throw new Error(`GROQ_API_KEY or AI_API_KEY is required for provider "${provider}"`);
   }
 
   return {

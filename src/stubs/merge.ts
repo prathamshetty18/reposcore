@@ -83,6 +83,7 @@ export function mergeScorecard(
     unscored: mode === "rules+gemma" ? unscored : [],
     total,
     model,
+    customRules: [],
     generatedAt: new Date().toISOString(),
   };
 

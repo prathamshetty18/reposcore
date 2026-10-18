@@ -32,6 +32,8 @@ import { runRules }      from "./rules/index.js";
 import { judge }         from "./judge/ai.js";
 import { mergeScorecard } from "./merge.js";
 import { isAIConfigured } from "./judge/provider.js";
+import { CustomRuleSchema, type CustomRule } from "./custom-rules/schema.js";
+import { loadProjectRules, runCustomRules } from "./custom-rules/engine.js";
 // ============================================================
 // USING_STUBS: set to false when real modules are wired above.
 // While true, every /api/judge response carries:
@@ -64,7 +66,8 @@ export type Deps = {
     mode: "rules" | "rules+ai" | "rules+gemma",
     unscored?: import("./schema.js").CriterionId[],
     servedBy?: string | null,
-    modelName?: string | null
+    modelName?: string | null,
+    customRules?: import("./schema.js").CustomRuleResult[]
   ) => import("./schema.js").Scorecard;
 };
 
@@ -203,6 +206,7 @@ const JudgeBodySchema = z.object({
   url: z.string(),
   mode: z.enum(["rules", "rules+ai", "rules+gemma"]),
   apiKey: z.string().optional(),
+  customRules: z.array(CustomRuleSchema).optional(),
 }).strict(); // reject unknown keys
 
 // ---- Error mapping from upstream errors ---------------------
@@ -348,7 +352,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       return;
     }
 
-    const { url: rawUrl, mode, apiKey } = bodyResult.data;
+    const { url: rawUrl, mode, apiKey, customRules } = bodyResult.data;
 
     // 2. Validate GitHub URL
     const urlResult = validateGithubUrl(rawUrl);
@@ -368,7 +372,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     try {
       const userApiKey = apiKey || (req.headers["x-api-key"] as string | undefined);
       const scorecard = await Promise.race([
-        runPipeline(deps, url, mode, userApiKey),
+        runPipeline(deps, url, mode, userApiKey, customRules),
         timeoutPromise,
       ]);
       if (timeoutId) clearTimeout(timeoutId);
@@ -425,10 +429,43 @@ async function runPipeline(
   deps: Deps,
   url: string,
   mode: "rules" | "rules+ai" | "rules+gemma",
-  userApiKey?: string
+  userApiKey?: string,
+  customRules?: CustomRule[]
 ): Promise<import("./schema.js").Scorecard> {
   const snap = await Promise.resolve(deps.buildSnapshot(url));
   const rules = await Promise.resolve(deps.runRules(snap));
+
+  // Load custom rules from repo rules.json, local rules.json, or request body
+  const ruleMap = new Map<string, CustomRule>();
+
+  const repoRulesContent = (snap as any).fileContents?.["rules.json"];
+  if (repoRulesContent) {
+    try {
+      const parsed = JSON.parse(repoRulesContent);
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          const res = CustomRuleSchema.safeParse(item);
+          if (res.success) ruleMap.set(res.data.id, res.data);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (process.env.NODE_ENV !== "test" || process.env.ENABLE_LOCAL_RULES === "true") {
+    const projectRules = loadProjectRules();
+    for (const r of projectRules) {
+      ruleMap.set(r.id, r);
+    }
+  }
+
+  for (const r of customRules ?? []) {
+    ruleMap.set(r.id, r);
+  }
+
+  const allCustomRules = Array.from(ruleMap.values());
+  const customRuleResults = runCustomRules(snap, allCustomRules);
 
   if (mode === "rules+gemma") {
     // Call judge exactly once with snap (for backwards compatibility with existing mock signatures)
@@ -449,7 +486,8 @@ async function runPipeline(
         mode,
         result.unscored,
         servedBy,
-        modelName
+        modelName,
+        customRuleResults
       )
     );
   }
@@ -473,13 +511,17 @@ async function runPipeline(
         mode,
         result.unscored,
         servedBy,
-        modelName
+        modelName,
+        customRuleResults
       )
     );
   }
 
   // In rules mode: never call judge
-  return Promise.resolve(deps.mergeScorecard(snap, rules, [], "rules"));
+  if (customRuleResults.length === 0) {
+    return Promise.resolve(deps.mergeScorecard(snap, rules, [], "rules"));
+  }
+  return Promise.resolve(deps.mergeScorecard(snap, rules, [], "rules", [], null, null, customRuleResults));
 }
 
 // ============================================================

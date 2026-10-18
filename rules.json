@@ -1,0 +1,38 @@
+[
+  {
+    "id": "custom.env_missing",
+    "name": "No Committed .env Files",
+    "description": "Ensures environment files with sensitive keys are not tracked in git",
+    "check": "file_missing",
+    "params": {
+      "path": ".env"
+    },
+    "severity": "high",
+    "weight": 2
+  },
+  {
+    "id": "custom.readme_has_license",
+    "name": "README License Mention",
+    "description": "Verifies that the README mentions licensing or MIT",
+    "check": "file_contains",
+    "params": {
+      "path": "README.md",
+      "pattern": "MIT",
+      "isRegex": false
+    },
+    "severity": "medium",
+    "weight": 1
+  },
+  {
+    "id": "custom.source_ts_count",
+    "name": "TypeScript Source Files Count",
+    "description": "Verifies that the repository contains at least 1 source file in src/",
+    "check": "file_count",
+    "params": {
+      "glob": "src/**/*.ts",
+      "min": 1
+    },
+    "severity": "medium",
+    "weight": 1
+  }
+]

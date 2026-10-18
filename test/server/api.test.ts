@@ -381,6 +381,53 @@ describe("RepoJudge Server API", () => {
       expect(body.total).toBeNull();
       expect(body.unscored).toEqual(["submission"]);
     });
+
+    it("accepts customRules in request body, executes them, and passes results to mergeScorecard", async () => {
+      const buildSnapshot = vi.fn().mockResolvedValue(mockSnapshot);
+      const runRules = vi.fn().mockReturnValue(mockRules);
+      const mergeScorecard = vi.fn().mockImplementation((snap, rules, verdicts, mode, unscored, servedBy, modelName, customRules) => ({
+        repo: `${snap.owner}/${snap.name}`,
+        mode,
+        rules,
+        customRules: customRules ?? [],
+        verdicts: [],
+        unscored: [],
+        total: 20,
+        model: null,
+        generatedAt: new Date().toISOString(),
+      }));
+
+      const { server, url } = await startTestServer({
+        deps: { buildSnapshot, runRules, mergeScorecard },
+      });
+      activeServers.push(server);
+
+      const customRule = {
+        id: "check-license-file",
+        name: "License Exists",
+        check: "file_exists",
+        params: { path: "LICENSE" },
+        severity: "high",
+        weight: 2,
+      };
+
+      const res = await fetch(`${url}/api/judge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: "https://github.com/owner/repo",
+          mode: "rules",
+          customRules: [customRule],
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(mergeScorecard).toHaveBeenCalled();
+      const body = await res.json();
+      expect(body.customRules).toHaveLength(1);
+      expect(body.customRules[0].id).toBe("check-license-file");
+      expect(body.customRules[0].pass).toBe(true);
+    });
   });
 
   // ---- Error Mapping & Secrets Hiding -------------------------
